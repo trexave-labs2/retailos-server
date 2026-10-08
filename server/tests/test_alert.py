@@ -43,7 +43,7 @@ def create_product(
             "store_id": store_id,
             "name": "Rice 1kg",
             "price": 2500,
-            "stock_quantity": stock_quantity,
+            "opening_stock": stock_quantity,
             "low_stock_threshold": low_stock_threshold
         }
     )
