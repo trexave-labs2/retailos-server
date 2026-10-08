@@ -50,7 +50,7 @@ def create_sale(
                 "store_id": store_id,
                 "name": product_name or f"Product {transaction_id}",
                 "price": 2500,
-                "stock_quantity": 10,
+                "opening_stock": 10,
                 "low_stock_threshold": 2
             }
         )
@@ -127,7 +127,7 @@ def test_dashboard_product_count_matches_product_list(client):
                 "store_id": store_id,
                 "name": name,
                 "price": 1000,
-                "stock_quantity": 10,
+                "opening_stock": 10,
                 "low_stock_threshold": 2
             }
         )
@@ -155,7 +155,7 @@ def test_dashboard_reflects_low_stock_products(client):
             "store_id": store_id,
             "name": "Low Stock Product",
             "price": 1000,
-            "stock_quantity": 2,
+            "opening_stock": 2,
             "low_stock_threshold": 5
         }
     )
@@ -220,7 +220,7 @@ def test_daily_brief_compares_days_and_builds_insights(client):
             "store_id": store_id,
             "name": "Declining Product",
             "price": 2500,
-            "stock_quantity": 10,
+            "opening_stock": 10,
             "low_stock_threshold": 2
         }
     )
