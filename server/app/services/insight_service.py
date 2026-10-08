@@ -10,6 +10,7 @@ from server.app.models.product import Product
 from server.app.models.sale import Sale
 from server.app.models.sale_item import SaleItem
 from server.app.utils.response import Response
+from server.app.services.product_service import ProductService
 from server.app.utils.store_authorization import get_authorized_store
 from server.app.utils.time import current_lagos_date, utc_bounds_for_lagos_date
 
@@ -41,9 +42,11 @@ class InsightService:
         sales = self._sales_range(store_id, start_utc, end_utc)
         total = self._sales_total(store_id, today)
 
+        products_query = ProductService.query_for_store(store_id)
+
         return Response.success_response(
             {
-                "products_count": Product.query.filter_by(store_id=store_id).count(),
+                "products_count": products_query.count(),
                 "low_stock_count": Product.query.filter(
                     Product.store_id == store_id,
                     Product.low_stock_threshold.is_not(None),
@@ -108,10 +111,12 @@ class InsightService:
         today_total = Decimal(str(self._sales_total(store_id, today)))
         yesterday_total = Decimal(str(self._sales_total(store_id, yesterday)))
 
-        if yesterday_total != 0:
+        comparison_available = yesterday_total != 0
+
+        if comparison_available:
             change = ((today_total - yesterday_total) / yesterday_total) * 100
         else:
-            change = Decimal("0.00")
+            change = None
 
         alerts = Alert.query.filter_by(
             store_id=store_id,
@@ -201,7 +206,12 @@ class InsightService:
                 "sales": {
                     "today_total": str(today_total),
                     "yesterday_total": str(yesterday_total),
-                    "change_percent": str(change.quantize(Decimal("0.01"))),
+                    "change_percent": (
+                        str(change.quantize(Decimal("0.01")))
+                        if change is not None
+                        else None
+                    ),
+                    "comparison_available": comparison_available,
                     "status": status
                 },
                 "alerts": [

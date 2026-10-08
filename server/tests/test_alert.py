@@ -43,7 +43,7 @@ def create_product(
             "store_id": store_id,
             "name": "Rice 1kg",
             "price": 2500,
-            "stock_quantity": stock_quantity,
+            "opening_stock": stock_quantity,
             "low_stock_threshold": low_stock_threshold
         }
     )
@@ -58,13 +58,6 @@ def test_generate_low_stock_alert(client):
     store_id = register_and_login(client)
     product_id = create_product(client, store_id)
 
-    response = client.post(
-        f"/alerts/generate-low-stock?store_id={store_id}"
-    )
-
-    assert response.status_code == 200
-    assert response.json["data"]["created_alerts"] == [product_id]
-
     alert = Alert.query.filter_by(
         store_id=store_id,
         product_id=product_id
@@ -73,6 +66,80 @@ def test_generate_low_stock_alert(client):
     assert alert is not None
     assert alert.type.value == "low_stock"
     assert alert.is_resolved is False
+
+    response = client.post(
+        f"/alerts/generate-low-stock?store_id={store_id}"
+    )
+
+    assert response.status_code == 200
+    assert response.json["data"]["created_alerts"] == []
+
+
+# Low-stock alerts are created automatically when a product is created below its threshold.
+def test_low_stock_alert_is_created_automatically(client):
+    store_id = register_and_login(client)
+    product_id = create_product(client, store_id, stock_quantity=2, low_stock_threshold=5)
+
+    alert = Alert.query.filter_by(
+        store_id=store_id,
+        product_id=product_id,
+        is_resolved=False
+    ).first()
+
+    assert alert is not None
+    assert alert.type.value == "low_stock"
+
+
+# Restocking above the threshold automatically resolves the open alert.
+def test_restock_resolves_low_stock_alert_automatically(client):
+    store_id = register_and_login(client)
+    product_id = create_product(client, store_id, stock_quantity=2, low_stock_threshold=5)
+
+    response = client.post(
+        "/product/adjust",
+        json={
+            "id": product_id,
+            "store_id": store_id,
+            "quantity_change": 5,
+            "reason": "New stock received"
+        }
+    )
+
+    assert response.status_code == 200
+
+    alert = Alert.query.filter_by(
+        store_id=store_id,
+        product_id=product_id
+    ).first()
+
+    assert alert is not None
+    assert alert.is_resolved is True
+
+
+# Crossing the threshold through a stock adjustment creates an alert automatically.
+def test_stock_adjustment_creates_low_stock_alert_automatically(client):
+    store_id = register_and_login(client)
+    product_id = create_product(client, store_id, stock_quantity=10, low_stock_threshold=5)
+
+    response = client.post(
+        "/product/adjust",
+        json={
+            "id": product_id,
+            "store_id": store_id,
+            "quantity_change": -5,
+            "reason": "Damaged products"
+        }
+    )
+
+    assert response.status_code == 200
+
+    alert = Alert.query.filter_by(
+        store_id=store_id,
+        product_id=product_id,
+        is_resolved=False
+    ).first()
+
+    assert alert is not None
 
 
 # Check that the same open low-stock alert is not duplicated.

@@ -57,6 +57,7 @@ Core fields:
 - id
 - store_id
 - name
+- base_unit
 - price
 - stock_quantity
 - low_stock_threshold
@@ -68,7 +69,9 @@ Rules:
 - product belongs to one store
 - price cannot be negative
 - stock quantity cannot be negative
-- low-stock threshold is used by the alert service
+- all stock quantities are stored in the product base unit
+- the default base unit is `piece`
+- low-stock threshold is expressed in the same base unit
 
 ## 4. Customers
 
@@ -241,6 +244,7 @@ These values do not require separate summary tables in V1.
 - sale inventory changes are transactional
 - duplicate client transaction IDs do not create duplicate sales
 - inventory movements preserve previous and resulting quantities
+- inventory quantities and sale quantities use the product base unit
 
 ## 14. Future Extensions
 

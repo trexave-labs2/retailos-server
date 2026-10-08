@@ -66,6 +66,7 @@ def test_login_user(client, register_new_user):
 
     assert current_response.status_code == 200
     assert current_response.json["data"]["user"]["email"] == "testuser1@example.com"
+    assert current_response.json["data"]["user"]["store_name"] == "testuser1's Store"
 
 
 # Check that a logged-in user can log out.

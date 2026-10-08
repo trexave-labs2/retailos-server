@@ -90,7 +90,7 @@ def test_customer_history(client):
             "store_id": store_id,
             "name": "Rice 1kg",
             "price": 2500,
-            "stock_quantity": 10,
+            "opening_stock": 10,
             "low_stock_threshold": 2
         }
     )
@@ -104,6 +104,7 @@ def test_customer_history(client):
         json={
             "store_id": store_id,
             "customer_id": customer_id,
+            "payment_method": "Cash",
             "items": [
                 {
                     "product_id": product_id,
@@ -172,3 +173,146 @@ def test_customers_require_authentication(client):
     response = client.get("/customers?store_id=1")
 
     assert response.status_code == 401
+
+
+# Check that customer search matches name and contact.
+def test_search_customers(client):
+    store_id = register_and_login(client, username="customer-search")
+    create_customer(client, store_id, "John Customer")
+
+    response = client.post(
+        "/customers",
+        json={
+            "store_id": store_id,
+            "name": "Mary Smith",
+            "contact": "08055555555"
+        }
+    )
+    assert response.status_code == 201
+
+    response = client.get(
+        f"/customers?store_id={store_id}&search=john"
+    )
+    assert response.status_code == 200
+    assert [c["name"] for c in response.json["data"]["customers"]] == ["John Customer"]
+
+    response = client.get(
+        f"/customers?store_id={store_id}&search=0805"
+    )
+    assert response.status_code == 200
+    assert [c["name"] for c in response.json["data"]["customers"]] == ["Mary Smith"]
+
+
+# Check that a customer can be updated.
+def test_update_customer(client):
+    store_id = register_and_login(client, username="customer-update")
+    customer_id = create_customer(client, store_id)
+
+    response = client.patch(
+        "/customers",
+        json={
+            "id": customer_id,
+            "store_id": store_id,
+            "name": "John Updated",
+            "contact": "08111111111"
+        }
+    )
+
+    assert response.status_code == 200
+    customer = response.json["data"]["customer"]
+    assert customer["name"] == "John Updated"
+    assert customer["contact"] == "08111111111"
+
+
+# Check that a customer can be deleted when no sales are linked.
+def test_delete_customer_without_sales(client):
+    store_id = register_and_login(client, username="customer-delete")
+    customer_id = create_customer(client, store_id)
+
+    response = client.delete(
+        "/customers",
+        json={"id": customer_id, "store_id": store_id}
+    )
+
+    assert response.status_code == 200
+    assert response.json["data"]["customer_id"] == customer_id
+
+    response = client.get(
+        f"/customers/history?store_id={store_id}&id={customer_id}"
+    )
+    assert response.status_code == 404
+
+
+# Deletion is blocked when a customer has sales, preserving purchase history.
+def test_delete_customer_with_sales_is_blocked(client):
+    store_id = register_and_login(client, username="customer-delete-sales")
+    customer_id = create_customer(client, store_id)
+    product_id = client.post(
+        "/product/create",
+        json={
+            "store_id": store_id,
+            "name": "Rice 1kg",
+            "price": 2500,
+            "opening_stock": 10,
+            "low_stock_threshold": 2
+        }
+    ).json["data"]["product"]["id"]
+
+    sale = client.post(
+        "/sales",
+        json={
+            "store_id": store_id,
+            "customer_id": customer_id,
+            "payment_method": "Cash",
+            "items": [{"product_id": product_id, "quantity": 1}]
+        }
+    )
+    assert sale.status_code == 201
+
+    response = client.delete(
+        "/customers",
+        json={"id": customer_id, "store_id": store_id}
+    )
+
+    assert response.status_code == 409
+    assert response.json["error"]["code"] == "CUSTOMER_HAS_SALES"
+    assert response.json["error"]["fields"]["sale_count"] == 1
+
+
+# Update and delete must remain store-scoped.
+def test_customer_update_and_delete_are_store_scoped(client):
+    first_store_id = register_and_login(client, username="customer-crud-first")
+    customer_id = create_customer(client, first_store_id)
+
+    second_store_id = register_and_login(client, username="customer-crud-second")
+
+    update = client.patch(
+        "/customers",
+        json={
+            "id": customer_id,
+            "store_id": first_store_id,
+            "name": "Hacked Customer"
+        }
+    )
+    delete = client.delete(
+        "/customers",
+        json={"id": customer_id, "store_id": first_store_id}
+    )
+
+    assert second_store_id != first_store_id
+    assert update.status_code == 403
+    assert delete.status_code == 403
+
+
+# An update must contain at least one editable field.
+def test_update_customer_requires_fields(client):
+    store_id = register_and_login(client, username="customer-update-validation")
+    customer_id = create_customer(client, store_id)
+
+    response = client.patch(
+        "/customers",
+        json={"id": customer_id, "store_id": store_id}
+    )
+
+    assert response.status_code == 400
+    assert response.json["error"]["code"] == "VALIDATION_ERROR"

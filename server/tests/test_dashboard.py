@@ -5,8 +5,6 @@ from datetime import datetime, timedelta, timezone
 
 from server.app.utils.time import current_lagos_date, utc_bounds_for_lagos_date
 
-from server.app.utils.time import current_lagos_date, utc_bounds_for_lagos_date
-
 
 def register_and_login(client, username="dashboarduser"):
     email = f"{username}@example.com"
@@ -50,7 +48,7 @@ def create_sale(
                 "store_id": store_id,
                 "name": product_name or f"Product {transaction_id}",
                 "price": 2500,
-                "stock_quantity": 10,
+                "opening_stock": 10,
                 "low_stock_threshold": 2
             }
         )
@@ -63,6 +61,7 @@ def create_sale(
         "/sales",
         json={
             "store_id": store_id,
+            "payment_method": "Cash",
             "items": [
                 {
                     "product_id": product_id,
@@ -117,6 +116,35 @@ def test_daily_summary_returns_sales(client):
     assert len(data["sales"]) == 2
 
 
+def test_dashboard_product_count_matches_product_list(client):
+    store_id = register_and_login(client, username="dashboard-product-count-user")
+
+    for name in ("Product A", "Product B"):
+        response = client.post(
+            "/product/create",
+            json={
+                "store_id": store_id,
+                "name": name,
+                "price": 1000,
+                "opening_stock": 10,
+                "low_stock_threshold": 2
+            }
+        )
+        assert response.status_code == 201
+
+    products_response = client.get(f"/product/list?store_id={store_id}")
+    dashboard_response = client.get(f"/dashboard?store_id={store_id}")
+
+    assert products_response.status_code == 200
+    assert dashboard_response.status_code == 200
+
+    products = products_response.json["data"]["products"]
+    dashboard = dashboard_response.json["data"]
+
+    assert dashboard["products_count"] == len(products)
+    assert dashboard["products_count"] == 2
+
+
 def test_dashboard_reflects_low_stock_products(client):
     store_id = register_and_login(client)
 
@@ -126,7 +154,7 @@ def test_dashboard_reflects_low_stock_products(client):
             "store_id": store_id,
             "name": "Low Stock Product",
             "price": 1000,
-            "stock_quantity": 2,
+            "opening_stock": 2,
             "low_stock_threshold": 5
         }
     )
@@ -172,7 +200,8 @@ def test_daily_brief_handles_zero_yesterday_sales(client):
     sales = response.json["data"]["sales"]
 
     assert sales["yesterday_total"] == "0.00"
-    assert sales["change_percent"] == "0.00"
+    assert sales["change_percent"] is None
+    assert sales["comparison_available"] is False
     assert sales["status"] == "UP"
 
 
@@ -191,7 +220,7 @@ def test_daily_brief_compares_days_and_builds_insights(client):
             "store_id": store_id,
             "name": "Declining Product",
             "price": 2500,
-            "stock_quantity": 10,
+            "opening_stock": 10,
             "low_stock_threshold": 2
         }
     )
@@ -245,11 +274,13 @@ def test_dashboard_uses_africa_lagos_day_boundaries(client):
     before_boundary = Sale(
         store_id=store_id,
         total_amount=1000,
+        payment_method="Cash",
         created_at=start_utc - timedelta(minutes=1)
     )
     at_boundary = Sale(
         store_id=store_id,
         total_amount=2500,
+        payment_method="Cash",
         created_at=start_utc
     )
     db.session.add_all([before_boundary, at_boundary])
@@ -269,45 +300,8 @@ def test_daily_summary_uses_africa_lagos_day_boundaries(client):
     start_utc, _ = utc_bounds_for_lagos_date(current_lagos_date())
 
     db.session.add_all([
-        Sale(store_id=store_id, total_amount=1000, created_at=start_utc - timedelta(minutes=1)),
-        Sale(store_id=store_id, total_amount=2500, created_at=start_utc),
-    ])
-    db.session.commit()
-
-    response = client.get(f"/dashboard/daily-summary?store_id={store_id}")
-
-    assert response.status_code == 200
-    data = response.json["data"]
-    assert data["sales_count"] == 1
-    assert data["total_sales"] == "2500.00"
-
-
-def test_dashboard_uses_africa_lagos_day_boundaries(client):
-    store_id = register_and_login(client, username="dashboard-timezone-user")
-    start_utc, end_utc = utc_bounds_for_lagos_date(current_lagos_date())
-
-    db.session.add_all([
-        Sale(store_id=store_id, total_amount=1000, created_at=start_utc - timedelta(minutes=1)),
-        Sale(store_id=store_id, total_amount=2500, created_at=start_utc),
-    ])
-    db.session.commit()
-
-    response = client.get(f"/dashboard?store_id={store_id}")
-
-    assert response.status_code == 200
-    data = response.json["data"]
-    assert data["today_sales_count"] == 1
-    assert data["today_sales_total"] == "2500.00"
-    assert end_utc > start_utc
-
-
-def test_daily_summary_uses_africa_lagos_day_boundaries(client):
-    store_id = register_and_login(client, username="daily-summary-timezone-user")
-    start_utc, _ = utc_bounds_for_lagos_date(current_lagos_date())
-
-    db.session.add_all([
-        Sale(store_id=store_id, total_amount=1000, created_at=start_utc - timedelta(minutes=1)),
-        Sale(store_id=store_id, total_amount=2500, created_at=start_utc),
+        Sale(store_id=store_id, total_amount=1000, payment_method="Cash", created_at=start_utc - timedelta(minutes=1)),
+        Sale(store_id=store_id, total_amount=2500, payment_method="Cash", created_at=start_utc),
     ])
     db.session.commit()
 

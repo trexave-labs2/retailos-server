@@ -18,6 +18,18 @@ def list_sales():
     return sales.list_sales()
 
 
+@sales_bp.route("/defaults", methods=["GET"])
+@require_session
+def defaults():
+    return sales.defaults()
+
+
+@sales_bp.route("/quick-add", methods=["GET"])
+@require_session
+def quick_add():
+    return sales.quick_add()
+
+
 @sales_bp.route("/get", methods=["GET"])
 @require_session
 def get_sale():

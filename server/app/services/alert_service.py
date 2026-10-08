@@ -9,6 +9,32 @@ from server.app.utils.store_authorization import get_authorized_store
 
 
 class AlertService:
+    @staticmethod
+    def sync_low_stock_alert(product):
+        """Keep the product's open low-stock alert in sync with its threshold."""
+        existing_alert = Alert.query.filter_by(
+            store_id=product.store_id,
+            product_id=product.id,
+            type=AlertType.LOW_STOCK,
+            is_resolved=False
+        ).first()
+
+        is_low_stock = (
+            product.product_type == "Physical"
+            and product.low_stock_threshold is not None
+            and product.stock_quantity <= product.low_stock_threshold
+        )
+
+        if is_low_stock and not existing_alert:
+            db.session.add(Alert(
+                store_id=product.store_id,
+                product_id=product.id,
+                type=AlertType.LOW_STOCK,
+                message=f"{product.name} is low on stock"
+            ))
+        elif not is_low_stock and existing_alert:
+            existing_alert.is_resolved = True
+
     def list_alerts(self):
         store_id = request.args.get("store_id", type=int)
 
@@ -52,6 +78,7 @@ class AlertService:
 
         products = Product.query.filter(
             Product.store_id == store_id,
+            Product.product_type == "Physical",
             Product.low_stock_threshold.is_not(None),
             Product.stock_quantity <= Product.low_stock_threshold
         ).all()

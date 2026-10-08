@@ -1,6 +1,7 @@
 from server.app.models.user import User
 from server.app.models.store import Store
 from server.app.models.product import Product
+from server.app.models.product_unit import ProductUnit
 from server.app.models.customer import Customer
 from server.app.models.sale import Sale
 from server.app.models.sale_item import SaleItem

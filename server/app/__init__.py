@@ -10,6 +10,7 @@ from server.app.routes.alert_routes import alert_bp
 from server.app.routes.auth_routes import auth_bp
 from server.app.routes.customer_routes import customer_bp
 from server.app.routes.dashboard_routes import dashboard_bp
+from server.app.routes.health_routes import health_bp
 from server.app.routes.product_routes import product_bp
 from server.app.routes.sales_routes import sales_bp
 from server.app.utils.response import Response
@@ -41,6 +42,7 @@ def create_app(config_class=Config):
     app.register_blueprint(customer_bp,url_prefix="/customers")
     app.register_blueprint(alert_bp,url_prefix="/alerts")
     app.register_blueprint(dashboard_bp,url_prefix="/dashboard")
+    app.register_blueprint(health_bp,url_prefix="/health")
     Migrate(app,db)
 
     allowed_origins = {
