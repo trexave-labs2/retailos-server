@@ -46,7 +46,7 @@ def create_product(
             "store_id": store_id,
             "name": name,
             "price": price,
-            "stock_quantity": stock_quantity,
+            "opening_stock": stock_quantity,
             "low_stock_threshold": low_stock_threshold
         }
     )
@@ -117,7 +117,7 @@ def test_update_product(client):
             "id": product_id,
             "name": "Rice 2kg",
             "price": 4500,
-            "stock_quantity": 20,
+            "opening_stock": 20,
             "low_stock_threshold": 5
         }
     )
@@ -142,7 +142,7 @@ def test_product_validation_rejects_invalid_data(client):
             "store_id": store_id,
             "name": "",
             "price": -100,
-            "stock_quantity": -5,
+            "opening_stock": -5,
             "low_stock_threshold": 2
         }
     )
@@ -300,7 +300,7 @@ def test_create_product(client):
             "store_id": store_id,
             "name": "Rice",
             "price": 2500,
-            "stock_quantity": 10,
+            "opening_stock": 10,
             "low_stock_threshold": 3
         }
     )
@@ -319,7 +319,7 @@ def test_create_product_rejects_negative_price(client):
             "store_id": store_id,
             "name": "Rice",
             "price": -1,
-            "stock_quantity": 10
+            "opening_stock": 10
         }
     )
 
@@ -337,7 +337,7 @@ def test_create_product_allows_no_low_stock_threshold(client):
             "store_id": store_id,
             "name": "Rice",
             "price": 2500,
-            "stock_quantity": 10
+            "opening_stock": 10
         }
     )
 
@@ -355,7 +355,7 @@ def test_list_products_requires_store_access(client):
             "store_id": first_store_id,
             "name": "Rice",
             "price": 2500,
-            "stock_quantity": 10
+            "opening_stock": 10
         }
     )
 
