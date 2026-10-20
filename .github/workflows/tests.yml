@@ -8,34 +8,23 @@ on:
   pull_request:
     branches:
       - main
+  workflow_dispatch:
+
+# Cancel superseded runs on the same branch/PR so CI minutes aren't wasted.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least privilege: this workflow only needs to read the repo.
+permissions:
+  contents: read
 
 jobs:
-  test:
-    name: server/tests
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Check out the repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r server/requirements.txt
-
-      - name: Run tests
-        env:
-          SECRET_KEY: test-secret-key
-        run: pytest server/tests
-        
   backend:
     name: Backend regression tests and migration check
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+
     services:
       postgres:
         image: postgres:16
@@ -80,7 +69,7 @@ jobs:
           flask --app server.app db heads | tee migration-heads.txt
           head_count=$(grep -c '(head)' migration-heads.txt || true)
           if [ "$head_count" -ne 1 ]; then
-            echo "Expected exactly one Alembic migration head, found $head_count."
+            echo "::error::Expected exactly one Alembic migration head, found $head_count."
             exit 1
           fi
 
@@ -92,5 +81,22 @@ jobs:
           flask --app server.app db current | tee migration-current.txt
           grep -q '(head)' migration-current.txt
 
+      - name: Verify models and migrations are in sync
+        run: flask --app server.app db check
+
+      # Run the suite without FRONTEND_URL / CORS_ORIGINS so CI-only values
+      # can't leak into config tests (e.g. production cookie settings, which
+      # depend on whether the frontend URL is http or https). Tests that need
+      # these values should set them explicitly with monkeypatch.
       - name: Run backend regression tests
-        run: pytest server/tests
+        run: env -u FRONTEND_URL -u CORS_ORIGINS pytest server/tests -ra
+
+      - name: Upload migration logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: migration-logs
+          path: |
+            migration-heads.txt
+            migration-current.txt
+          if-no-files-found: ignore
