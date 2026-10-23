@@ -19,6 +19,7 @@ class Product(db.Model):
     price: Mapped[Decimal] = mapped_column(Numeric(10, 2))
     stock_quantity: Mapped[int] = mapped_column(Integer, default=0)
     low_stock_threshold: Mapped[int | None] = mapped_column(Integer)
+    category_id: Mapped[int | None] = mapped_column(ForeignKey("categories.id", ondelete="SET NULL"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now_utc)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=now_utc, onupdate=now_utc)
     

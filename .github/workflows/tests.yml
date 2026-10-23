@@ -18,6 +18,7 @@ concurrency:
 # Least privilege: this workflow only needs to read the repo.
 permissions:
   contents: read
+  statuses: write
 
 jobs:
   backend:

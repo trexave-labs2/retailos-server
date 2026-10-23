@@ -12,6 +12,18 @@ def create_sale():
     return sales.create_sale()
 
 
+@sales_bp.route('/checkout', methods=['POST'])
+@require_session
+def checkout():
+    return sales.checkout()
+
+
+@sales_bp.route('/sync', methods=['POST'])
+@require_session
+def sync_offline_sale():
+    return sales.sync_offline_sale()
+
+
 @sales_bp.route('/payments', methods=['POST'])
 @require_session
 def add_payment():

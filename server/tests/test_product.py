@@ -2,6 +2,7 @@
 import pytest
 
 from server.app.extensions import db
+from server.app.models.alert import Alert
 from server.app.models.inventory_movement import InventoryMovement
 from server.app.models.product import Product
 
@@ -429,8 +430,12 @@ def test_product_stores_stock_in_explicit_base_unit(client):
         },
     )
 
-    assert response.status_code == 200
-    assert response.json["data"]["product"]["base_unit"] == "kilogram"
+    assert response.status_code == 400
+    assert response.json["error"]["code"] == "VALIDATION_ERROR"
+    assert "base_unit" in response.json["error"]["fields"]
+    refreshed = client.get(f"/product/get?store_id={store_id}&id={product['id']}")
+    assert refreshed.json["data"]["product"]["base_unit"] == "gram"
+    assert refreshed.json["data"]["product"]["stock_quantity"] == 50
 
 
 def test_product_defaults_to_piece_base_unit(client):
@@ -507,3 +512,134 @@ def test_database_rejects_negative_product_stock(client):
     db.session.rollback()
     db.session.expire_all()
     assert db.session.get(Product, product_id).stock_quantity == 5
+
+
+
+@pytest.mark.parametrize("unit_name", ["piece", "pieces", "kg", "bag", "bags", "custom feed sack"])
+def test_product_accepts_standard_and_valid_custom_units(client, unit_name):
+    store_id = register_and_login(client, username=f"valid-unit-{unit_name.replace(' ', '-')}")
+    response = client.post(
+        "/product/create",
+        json={
+            "store_id": store_id,
+            "name": "Unit Validation Product",
+            "price": 100,
+            "opening_stock": 7,
+            "base_unit": unit_name,
+        },
+    )
+
+    assert response.status_code == 201
+    product = response.json["data"]["product"]
+    assert product["base_unit"] == unit_name
+    assert product["stock_quantity"] == 7
+    assert any(
+        unit["name"] == unit_name and unit["base_quantity"] == 1
+        for unit in product["units"]
+    )
+
+
+@pytest.mark.parametrize("unit_name", ["../bag", "kg/box", "bag!", "unit@home", ""])
+def test_product_rejects_invalid_custom_unit_names(client, unit_name):
+    store_id = register_and_login(client, username=f"invalid-unit-{len(unit_name)}-{ord(unit_name[0]) if unit_name else 0}")
+    response = client.post(
+        "/product/create",
+        json={
+            "store_id": store_id,
+            "name": "Invalid Unit Product",
+            "price": 100,
+            "opening_stock": 1,
+            "base_unit": unit_name,
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json["error"]["code"] == "VALIDATION_ERROR"
+    assert "base_unit" in response.json["error"]["fields"]
+
+
+def test_product_requires_base_unit_conversion_to_be_one(client):
+    store_id = register_and_login(client, username="invalid-base-conversion")
+    response = client.post(
+        "/product/create",
+        json={
+            "store_id": store_id,
+            "name": "Rice",
+            "price": 100,
+            "base_unit": "kg",
+            "units": [
+                {"name": "kg", "base_quantity": 5, "price": 100},
+                {"name": "bag", "base_quantity": 25, "price": 2400},
+            ],
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json["error"]["code"] == "VALIDATION_ERROR"
+    assert "units" in response.json["error"]["fields"]
+
+
+
+def test_product_type_changes_enable_and_disable_inventory_behavior(client):
+    store_id = register_and_login(client, username="s14-product-type-user")
+    response = client.post(
+        "/product/create",
+        json={
+            "store_id": store_id,
+            "name": "Repair Service",
+            "product_type": "Service",
+            "price": 2500,
+        },
+    )
+    assert response.status_code == 201
+    service_id = response.json["data"]["product"]["id"]
+
+    physical_response = client.patch(
+        "/product/update",
+        json={
+            "store_id": store_id,
+            "id": service_id,
+            "product_type": "Physical",
+            "stock_quantity": 10,
+            "base_unit": "piece",
+            "low_stock_threshold": 3,
+        },
+    )
+    assert physical_response.status_code == 200
+    physical = physical_response.json["data"]["product"]
+    assert physical["product_type"] == "Physical"
+    assert physical["stock_quantity"] == 10
+    assert physical["low_stock_threshold"] == 3
+
+    adjustment = client.post(
+        "/product/adjust",
+        json={
+            "store_id": store_id,
+            "id": service_id,
+            "quantity_change": -10,
+            "reason": "Clear stock before converting to service",
+        },
+    )
+    assert adjustment.status_code == 200
+
+    service_again = client.patch(
+        "/product/update",
+        json={
+            "store_id": store_id,
+            "id": service_id,
+            "product_type": "Service",
+        },
+    )
+    assert service_again.status_code == 200
+    service_data = service_again.json["data"]["product"]
+    assert service_data["product_type"] == "Service"
+    assert service_data["stock_quantity"] == 0
+    assert service_data["low_stock_threshold"] is None
+
+    product = db.session.get(Product, service_id)
+    assert product.stock_quantity == 0
+    assert product.low_stock_threshold is None
+    assert Alert.query.filter_by(
+        product_id=service_id,
+        is_resolved=False,
+    ).count() == 0

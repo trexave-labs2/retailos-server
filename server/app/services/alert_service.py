@@ -1,5 +1,6 @@
 # server/app/services/alert_service.py
 from flask import request
+from sqlalchemy import or_
 
 from server.app.extensions import db
 from server.app.models.alert import Alert, AlertType
@@ -45,9 +46,16 @@ class AlertService:
                 {}
             ), 403
 
-        alerts = Alert.query.filter_by(
-            store_id=store_id,
-            is_resolved=False
+        alerts = Alert.query.outerjoin(
+            Product,
+            Alert.product_id == Product.id,
+        ).filter(
+            Alert.store_id == store_id,
+            Alert.is_resolved.is_(False),
+            or_(
+                Alert.product_id.is_(None),
+                Product.product_type == "Physical",
+            ),
         ).order_by(Alert.created_at.desc()).all()
 
         return Response.success_response(
@@ -75,6 +83,14 @@ class AlertService:
                 "You do not have access to this store",
                 {}
             ), 403
+
+        # Retain legacy alert records, but resolve open alerts attached to services.
+        services = Product.query.filter_by(
+            store_id=store_id,
+            product_type="Service",
+        ).all()
+        for service in services:
+            self.sync_low_stock_alert(service)
 
         products = Product.query.filter(
             Product.store_id == store_id,
@@ -149,6 +165,7 @@ class AlertService:
     def create_low_stock_alerts(self, store_id, product_ids=None):
         query = Product.query.filter(
             Product.store_id == store_id,
+            Product.product_type == "Physical",
             Product.low_stock_threshold.is_not(None),
             Product.stock_quantity <= Product.low_stock_threshold
         )

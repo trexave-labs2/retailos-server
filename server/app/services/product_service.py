@@ -1,14 +1,18 @@
 # server/app/services/product_service.py
 from decimal import Decimal
+import re
 
 from flask import request, session
 from sqlalchemy.exc import IntegrityError
 
 from server.app.extensions import db
 from server.app.services.alert_service import AlertService
+from server.app.services.audit_service import AuditService
 from server.app.models.inventory_movement import InventoryMovement
 from server.app.models.product import Product
+from server.app.models.category import Category
 from server.app.models.product_unit import ProductUnit
+from server.app.models.stock_receiving import StockReceiving
 from server.app.utils.response import Response
 from server.app.utils.store_authorization import get_authorized_store
 from server.app.utils.validators import (
@@ -19,6 +23,16 @@ from server.app.utils.validators import (
 
 
 class ProductService:
+    UNIT_NAME_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9 _-]{0,19}$")
+
+    @classmethod
+    def _valid_unit_name(cls, name):
+        return (
+            isinstance(name, str)
+            and name == name.strip()
+            and bool(cls.UNIT_NAME_PATTERN.fullmatch(name))
+        )
+
     @staticmethod
     def query_for_store(store_id):
         """Return the canonical product query used for store product reads."""
@@ -37,21 +51,25 @@ class ProductService:
             ProductUnit.base_quantity.asc(),
             ProductUnit.id.asc(),
         ).all()
+        inventory_tracked = product.product_type == "Physical"
+        stock_quantity = product.stock_quantity if inventory_tracked else 0
+        low_stock_threshold = product.low_stock_threshold if inventory_tracked else None
 
         return {
             "id": product.id,
             "store_id": product.store_id,
             "name": product.name,
             "product_type": product.product_type,
+            "category_id": product.category_id,
             "base_unit": product.base_unit,
             "price": str(product.price),
             "units": [self._unit_data(unit) for unit in units],
-            "stock_quantity": product.stock_quantity,
-            "low_stock_threshold": product.low_stock_threshold,
+            "stock_quantity": stock_quantity,
+            "low_stock_threshold": low_stock_threshold,
             "stock": {
-                "quantity": product.stock_quantity,
+                "quantity": stock_quantity,
                 "base_unit": product.base_unit,
-                "low_stock_threshold": product.low_stock_threshold
+                "low_stock_threshold": low_stock_threshold
             },
             "created_at": product.created_at.isoformat(),
             "updated_at": product.updated_at.isoformat()
@@ -70,8 +88,11 @@ class ProductService:
             if not isinstance(name, str) or not name.strip():
                 return "Unit name must be a non-empty string"
             name = name.strip()
-            if len(name) > 20:
-                return "Unit name must be 20 characters or fewer"
+            if not self._valid_unit_name(name):
+                return (
+                    "Unit names must start with a letter and contain only letters, "
+                    "numbers, spaces, underscores, or hyphens, up to 20 characters"
+                )
             if name.lower() in names:
                 return "Unit names must be unique"
             names.add(name.lower())
@@ -136,6 +157,7 @@ class ProductService:
             opening_stock = data.get("opening_stock", 0)
             threshold = data.get("low_stock_threshold")
             product_type = data.get("product_type", "Physical")
+            category_id = data.get("category_id")
             base_unit = data.get("base_unit", "piece")
             units = data.get("units")
 
@@ -144,6 +166,16 @@ class ProductService:
             if product_type not in Product.PRODUCT_TYPES:
                 fields["product_type"] = "Product type must be one of: Physical, Service"
 
+            if category_id is not None:
+                if not isinstance(category_id, int) or isinstance(category_id, bool):
+                    fields["category_id"] = "Category ID must be an integer or null"
+                else:
+                    category = Category.query.filter_by(id=category_id, store_id=store_id).first()
+                    if not category:
+                        fields["category_id"] = "Category does not belong to this store"
+                    elif category.item_type != product_type:
+                        fields["category_id"] = "Category item type must match product type"
+
             if "stock_quantity" in data:
                 fields["opening_stock"] = (
                     "Use 'opening_stock' when creating a product"
@@ -151,8 +183,11 @@ class ProductService:
 
             if not isinstance(base_unit, str) or not base_unit.strip():
                 fields["base_unit"] = "Base unit must be a non-empty string"
-            elif len(base_unit.strip()) > 20:
-                fields["base_unit"] = "Base unit must be 20 characters or fewer"
+            elif not self._valid_unit_name(base_unit.strip()):
+                fields["base_unit"] = (
+                    "Base unit must start with a letter and contain only letters, "
+                    "numbers, spaces, underscores, or hyphens, up to 20 characters"
+                )
 
             if not isinstance(store_id, int):
                 fields["store_id"] = "Store ID must be an integer"
@@ -178,7 +213,12 @@ class ProductService:
             if error:
                 fields["opening_stock"] = error
 
-            if threshold is not None:
+            if product_type == "Service":
+                if opening_stock != 0:
+                    fields["opening_stock"] = "Services cannot have opening stock"
+                if threshold is not None:
+                    fields["low_stock_threshold"] = "Services cannot have a low-stock threshold"
+            elif threshold is not None:
                 error = validate_positive_integer(
                     threshold,
                     "Low stock threshold",
@@ -192,6 +232,15 @@ class ProductService:
                 error = self._validate_units(units)
                 if error:
                     fields["units"] = error
+                else:
+                    base_matches = [
+                        unit for unit in units
+                        if unit["name"].strip().lower() == base_unit.strip().lower()
+                    ]
+                    if base_matches and base_matches[0]["base_quantity"] != 1:
+                        fields["units"] = "The base unit must have a conversion quantity of 1"
+                    elif base_matches:
+                        base_matches[0]["name"] = base_unit.strip()
 
             if fields:
                 return Response.error_response(
@@ -200,14 +249,20 @@ class ProductService:
                     fields
                 ), 400
 
+            from server.app.services.subscription_service import SubscriptionService
+            limit_error = SubscriptionService.check_limit(store_id, "products")
+            if limit_error:
+                return limit_error
+
             product = Product(
                 store_id=store_id,
                 name=name.strip(),
                 product_type=product_type,
                 base_unit=base_unit.strip(),
                 price=Decimal(str(price)),
-                stock_quantity=opening_stock,
-                low_stock_threshold=threshold
+                stock_quantity=opening_stock if product_type == "Physical" else 0,
+                low_stock_threshold=threshold if product_type == "Physical" else None,
+                category_id=category_id
             )
 
             db.session.add(product)
@@ -221,6 +276,16 @@ class ProductService:
                         "price": price,
                     }
                 ]
+
+            if not any(
+                unit_data["name"].strip().lower() == base_unit.strip().lower()
+                for unit_data in units
+            ):
+                units.append({
+                    "name": base_unit.strip(),
+                    "base_quantity": 1,
+                    "price": price,
+                })
 
             for unit_data in units:
                 db.session.add(
@@ -298,7 +363,18 @@ class ProductService:
                 {}
             ), 403
 
-        products = self.query_for_store(store_id).order_by(Product.name.asc()).all()
+        category_id = request.args.get("category_id", type=int)
+        query = self.query_for_store(store_id)
+        if category_id is not None:
+            category = Category.query.filter_by(id=category_id, store_id=store_id).first()
+            if not category:
+                return Response.error_response(
+                    "CATEGORY_NOT_FOUND",
+                    "Category not found",
+                    {},
+                ), 404
+            query = query.filter_by(category_id=category_id)
+        products = query.order_by(Product.name.asc()).all()
 
         return Response.success_response(
             {
@@ -339,7 +415,51 @@ class ProductService:
                     {}
                 ), 404
 
+            previous_price = str(product.price)
             fields = {}
+            requested_type = data.get("product_type", product.product_type)
+            effective_category_id = data.get("category_id", product.category_id)
+            if effective_category_id is not None:
+                if not isinstance(effective_category_id, int) or isinstance(effective_category_id, bool):
+                    fields["category_id"] = "Category ID must be an integer or null"
+                else:
+                    category = Category.query.filter_by(
+                        id=effective_category_id,
+                        store_id=store_id,
+                    ).first()
+                    if not category:
+                        fields["category_id"] = "Category does not belong to this store"
+                    elif category.item_type != requested_type:
+                        fields["category_id"] = "Category item type must match product type"
+
+            if requested_type not in Product.PRODUCT_TYPES:
+                fields["product_type"] = "Product type must be one of: Physical, Service"
+            elif product.product_type == "Physical" and requested_type == "Service":
+                if product.stock_quantity > 0:
+                    fields["product_type"] = (
+                        "Stock must be reduced to zero through stock adjustments before converting to a service"
+                    )
+            elif product.product_type == "Service" and requested_type == "Physical":
+                if "stock_quantity" not in data or "base_unit" not in data:
+                    fields["product_type"] = (
+                        "Converting a service to a physical product requires stock_quantity and base_unit"
+                    )
+
+            if requested_type == "Service":
+                if "stock_quantity" in data and data["stock_quantity"] != 0:
+                    fields["stock_quantity"] = "Services cannot have stock quantity"
+                if "low_stock_threshold" in data and data["low_stock_threshold"] is not None:
+                    fields["low_stock_threshold"] = "Services cannot have a low-stock threshold"
+
+            if fields:
+                return Response.error_response(
+                    "VALIDATION_ERROR",
+                    "Invalid input data",
+                    fields
+                ), 400
+
+            if "category_id" in data:
+                product.category_id = data["category_id"]
 
             if "name" in data:
                 error = validate_required_string(
@@ -356,16 +476,46 @@ class ProductService:
                 base_unit = data["base_unit"]
                 if not isinstance(base_unit, str) or not base_unit.strip():
                     fields["base_unit"] = "Base unit must be a non-empty string"
-                elif len(base_unit.strip()) > 20:
-                    fields["base_unit"] = "Base unit must be 20 characters or fewer"
-                else:
-                    product.base_unit = base_unit.strip()
+                elif not self._valid_unit_name(base_unit.strip()):
+                    fields["base_unit"] = (
+                        "Base unit must start with a letter and contain only letters, "
+                        "numbers, spaces, underscores, or hyphens, up to 20 characters"
+                    )
+                elif base_unit.strip().lower() != product.base_unit.lower():
+                    from server.app.models.sale_item import SaleItem
+                    has_sales = SaleItem.query.filter_by(product_id=product.id).first() is not None
+                    has_receivings = StockReceiving.query.filter_by(product_id=product.id).first() is not None
+                    has_movements = InventoryMovement.query.filter_by(product_id=product.id).first() is not None
+                    if product.stock_quantity > 0 or has_sales or has_receivings or has_movements:
+                        fields["base_unit"] = (
+                            "Base unit cannot change after stock or inventory history exists; "
+                            "create a new product to avoid reinterpreting saved quantities"
+                        )
+                    else:
+                        matching_unit = ProductUnit.query.filter_by(
+                            product_id=product.id,
+                            name=base_unit.strip(),
+                        ).first()
+                        if matching_unit and matching_unit.base_quantity != 1:
+                            fields["base_unit"] = "The base unit must have a conversion quantity of 1"
+                        else:
+                            product.base_unit = base_unit.strip()
+                            if not matching_unit:
+                                db.session.add(ProductUnit(
+                                    product_id=product.id,
+                                    name=base_unit.strip(),
+                                    base_quantity=1,
+                                    price=product.price,
+                                ))
 
             if "product_type" in data:
-                if data["product_type"] not in Product.PRODUCT_TYPES:
-                    fields["product_type"] = "Product type must be one of: Physical, Service"
-                else:
-                    product.product_type = data["product_type"]
+                product.product_type = requested_type
+
+            # Services never track inventory. Normalize legacy values whenever
+            # a service is updated, without deleting historical movement records.
+            if requested_type == "Service":
+                product.stock_quantity = 0
+                product.low_stock_threshold = None
 
             if "price" in data:
                 error = validate_non_negative_number(
@@ -407,24 +557,42 @@ class ProductService:
                 if error:
                     fields["units"] = error
                 else:
-                    existing_units = {
-                        unit.name.lower(): unit
-                        for unit in ProductUnit.query.filter_by(product_id=product.id).all()
-                    }
-                    for unit_data in data["units"]:
-                        name = unit_data["name"].strip()
-                        unit = existing_units.get(name.lower())
-                        if unit is None:
-                            unit = ProductUnit(
-                                product_id=product.id,
-                                name=name,
-                            )
-                            db.session.add(unit)
+                    base_unit_name = product.base_unit
+                    base_matches = [
+                        unit for unit in data["units"]
+                        if unit["name"].strip().lower() == base_unit_name.lower()
+                    ]
+                    if base_matches and base_matches[0]["base_quantity"] != 1:
+                        fields["units"] = "The base unit must have a conversion quantity of 1"
+                    elif base_matches:
+                        base_matches[0]["name"] = base_unit_name
+                    else:
+                        data["units"].append({
+                            "name": base_unit_name,
+                            "base_quantity": 1,
+                            "price": str(product.price),
+                        })
 
-                        unit.base_quantity = unit_data["base_quantity"]
-                        unit.price = Decimal(str(unit_data["price"]))
+                    if "units" not in fields:
+                        existing_units = {
+                            unit.name.lower(): unit
+                            for unit in ProductUnit.query.filter_by(product_id=product.id).all()
+                        }
+                        for unit_data in data["units"]:
+                            name = unit_data["name"].strip()
+                            unit = existing_units.get(name.lower())
+                            if unit is None:
+                                unit = ProductUnit(
+                                    product_id=product.id,
+                                    name=name,
+                                )
+                                db.session.add(unit)
+
+                            unit.base_quantity = unit_data["base_quantity"]
+                            unit.price = Decimal(str(unit_data["price"]))
 
             if fields:
+                db.session.rollback()
                 return Response.error_response(
                     "VALIDATION_ERROR",
                     "Invalid input data",
@@ -432,6 +600,16 @@ class ProductService:
                 ), 400
 
             AlertService().sync_low_stock_alert(product)
+            if str(product.price) != previous_price:
+                AuditService.record(
+                    store_id=store_id,
+                    action_type="PRODUCT_PRICE_CHANGED",
+                    entity_type="product",
+                    entity_id=product.id,
+                    before={"price": previous_price},
+                    after={"price": str(product.price)},
+                    details={"product_name": product.name},
+                )
             db.session.commit()
 
             return Response.success_response(
@@ -477,6 +655,19 @@ class ProductService:
                 "Product not found",
                 {}
             ), 404
+
+        # Preserve acquisition-cost and receiving history. SQLite deployments may
+        # not enforce foreign keys unless explicitly enabled, so enforce this
+        # domain rule before attempting deletion rather than relying only on RESTRICT.
+        if StockReceiving.query.filter_by(
+            store_id=store_id,
+            product_id=product_id,
+        ).first():
+            return Response.error_response(
+                "PRODUCT_HAS_STOCK_RECEIVINGS",
+                "Product cannot be deleted because it has stock receiving history",
+                {},
+            ), 409
 
         try:
             db.session.delete(product)
@@ -536,6 +727,13 @@ class ProductService:
                 {}
             ), 404
 
+        if product.product_type != "Physical":
+            return Response.error_response(
+                "VALIDATION_ERROR",
+                "Stock adjustments are only available for physical products",
+                {"product_type": "Services do not track inventory"}
+            ), 400
+
         new_quantity = product.stock_quantity + quantity_change
 
         if new_quantity < 0:
@@ -564,6 +762,15 @@ class ProductService:
 
         db.session.add(movement)
         AlertService().sync_low_stock_alert(product)
+        AuditService.record(
+            store_id=store_id,
+            action_type="STOCK_ADJUSTED",
+            entity_type="product",
+            entity_id=product.id,
+            before={"stock_quantity": previous_quantity},
+            after={"stock_quantity": new_quantity},
+            details={"quantity_change": quantity_change, "reason": movement.reason},
+        )
         db.session.commit()
 
         return Response.success_response(

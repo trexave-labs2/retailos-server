@@ -22,6 +22,11 @@ def login():
 def me():
     return auth.current_user()
 
+@auth_bp.route("/change-password", methods=["POST"])
+@require_session
+def change_password():
+    return auth.change_password()
+
 @auth_bp.route("/logout", methods=["POST"])
 @require_session
 def logout():

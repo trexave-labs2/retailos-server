@@ -7,13 +7,16 @@ from sqlalchemy.exc import IntegrityError
 
 from server.app.extensions import db
 from server.app.models.customer import Customer
+from server.app.models.category import Category
 from server.app.models.inventory_movement import InventoryMovement
 from server.app.models.product import Product
 from server.app.models.product_unit import ProductUnit
 from server.app.models.sale import Sale
 from server.app.models.store import Store
 from server.app.models.sale_payment import SalePayment
+from server.app.models.refund import Refund
 from server.app.models.sale_item import SaleItem
+from server.app.services.audit_service import AuditService
 from server.app.utils.response import Response
 from server.app.utils.store_authorization import get_authorized_store
 from server.app.utils.time import now_utc
@@ -66,16 +69,28 @@ class SalesService:
                     {}
                 ), 400
 
+            client_transaction_id = client_transaction_id.strip()
+            if not client_transaction_id or len(client_transaction_id) > 128:
+                return Response.error_response(
+                    "VALIDATION_ERROR",
+                    "Client transaction ID must contain 1 to 128 characters",
+                    {}
+                ), 400
+
             old_sale = Sale.query.filter_by(
                 store_id=store_id,
                 client_transaction_id=client_transaction_id
             ).first()
 
             if old_sale:
-                return self._response(
-                    old_sale,
-                    "SALE_ALREADY_PROCESSED"
-                ), 200
+                if not self._sale_matches_retry(old_sale, data):
+                    return Response.error_response(
+                        "IDEMPOTENCY_KEY_REUSED",
+                        "Client transaction ID has already been used for a different sale",
+                        {"sync_status": "rejected"}
+                    ), 409
+
+                return self._response(old_sale, "SALE_ALREADY_PROCESSED"), 200
 
         if customer_id is not None:
             customer = Customer.query.filter_by(
@@ -89,6 +104,11 @@ class SalesService:
                     "Customer not found",
                     {}
                 ), 404
+
+        from server.app.services.subscription_service import SubscriptionService
+        limit_error = SubscriptionService.check_limit(store_id, "sales_per_month")
+        if limit_error:
+            return limit_error
 
         try:
             created_at = now_utc()
@@ -197,6 +217,39 @@ class SalesService:
                 base_quantity = selected_unit.base_quantity if selected_unit else 1
                 catalog_unit_price = selected_unit.price if selected_unit else product.price
 
+                expected_unit_price = item.get("expected_unit_price")
+                if expected_unit_price is not None:
+                    try:
+                        expected_price = Decimal(str(expected_unit_price))
+                    except (ArithmeticError, ValueError, TypeError):
+                        db.session.rollback()
+                        return Response.error_response(
+                            "VALIDATION_ERROR",
+                            "Expected unit price must be a valid number",
+                            {"retryable": False}
+                        ), 400
+
+                    if not expected_price.is_finite() or expected_price < 0:
+                        db.session.rollback()
+                        return Response.error_response(
+                            "VALIDATION_ERROR",
+                            "Expected unit price must be a finite, non-negative number",
+                            {"retryable": False}
+                        ), 400
+
+                    if expected_price != Decimal(str(catalog_unit_price)):
+                        db.session.rollback()
+                        return Response.error_response(
+                            "STALE_PRICE",
+                            "The product price has changed. Refresh the item price before checking out.",
+                            {
+                                "product_id": product.id,
+                                "expected_unit_price": str(expected_price),
+                                "current_unit_price": str(catalog_unit_price),
+                                "retryable": False
+                            }
+                        ), 409
+
                 if unit_price is not None:
                     if product.product_type != "Service":
                         db.session.rollback()
@@ -215,6 +268,15 @@ class SalesService:
                         return Response.error_response(
                             "VALIDATION_ERROR",
                             "Unit price must be a valid number",
+                            {}
+                        ), 400
+
+                    if not actual_unit_price.is_finite():
+                        db.session.rollback()
+
+                        return Response.error_response(
+                            "VALIDATION_ERROR",
+                            "Unit price must be a finite number",
                             {}
                         ), 400
 
@@ -362,12 +424,22 @@ class SalesService:
                     physical_product_ids
                 )
 
+            AuditService.record(
+                store_id=store_id,
+                action_type="SALE_CREATED",
+                entity_type="sale",
+                entity_id=sale.id,
+                after={
+                    "total_amount": str(sale.total_amount),
+                    "amount_paid": str(sale.amount_paid),
+                    "balance": str(sale.balance),
+                    "payment_method": sale.payment_method,
+                },
+                details={"item_count": len(items)},
+            )
             db.session.commit()
 
-            return self._response(
-                sale,
-                "SALE_CREATED"
-            ), 201
+            return self._response(sale, "SALE_CREATED"), 201
 
         except IntegrityError:
             db.session.rollback()
@@ -379,10 +451,13 @@ class SalesService:
                 ).first()
 
                 if existing_sale:
-                    return self._response(
-                        existing_sale,
-                        "SALE_ALREADY_PROCESSED"
-                    ), 200
+                    if not self._sale_matches_retry(existing_sale, data):
+                        return Response.error_response(
+                            "IDEMPOTENCY_KEY_REUSED",
+                            "Client transaction ID has already been used for a different sale",
+                            {}
+                        ), 409
+                    return self._response(existing_sale, "SALE_ALREADY_PROCESSED"), 200
 
             return Response.error_response(
                 "CONFLICT_ERROR",
@@ -394,6 +469,152 @@ class SalesService:
             db.session.rollback()
             raise
 
+
+    def checkout(self):
+        """Run checkout with a required idempotency key and stable error metadata."""
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            return Response.error_response(
+                "VALIDATION_ERROR",
+                "Invalid input data",
+                {"retryable": False}
+            ), 400
+
+        transaction_id = data.get("client_transaction_id")
+        if not isinstance(transaction_id, str) or not transaction_id.strip():
+            return Response.error_response(
+                "VALIDATION_ERROR",
+                "A client transaction ID is required to safely retry checkout",
+                {"retryable": False}
+            ), 400
+
+        items = data.get("items")
+        if not isinstance(items, list) or not items:
+            return Response.error_response(
+                "VALIDATION_ERROR",
+                "At least one sale item is required",
+                {"retryable": False}
+            ), 400
+        if any(not isinstance(item, dict) or item.get("expected_unit_price") is None for item in items):
+            return Response.error_response(
+                "VALIDATION_ERROR",
+                "Each checkout item must include expected_unit_price to detect stale prices",
+                {"retryable": False}
+            ), 400
+
+        try:
+            response, status = self.create_sale()
+            if isinstance(response, dict) and isinstance(response.get("error"), dict):
+                error = response["error"]
+                fields = error.setdefault("fields", {})
+                code = error.get("code")
+                retryable = status >= 500 or (
+                    status == 409 and code not in {
+                        "IDEMPOTENCY_KEY_REUSED",
+                        "STALE_PRICE",
+                    }
+                )
+                fields.setdefault("retryable", retryable)
+                # Log a compact event without request bodies, customer details,
+                # credentials, or payment data.
+                from flask import current_app
+                current_app.logger.info(
+                    "Checkout rejected code=%s status=%s retryable=%s",
+                    code or "UNKNOWN_ERROR",
+                    status,
+                    retryable,
+                )
+            return response, status
+        except Exception as error:
+            db.session.rollback()
+            from flask import current_app
+            current_app.logger.error(
+                "Checkout operation failed error_type=%s",
+                type(error).__name__,
+            )
+            return Response.error_response(
+                "INTERNAL_SERVER_ERROR",
+                "Checkout could not be completed. Retry using the same client transaction ID.",
+                {"retryable": True}
+            ), 500
+
+    def sync_offline_sale(self):
+        """Accept a queued sale using the normal transactional sale workflow."""
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            return Response.error_response(
+                "VALIDATION_ERROR",
+                "Invalid input data",
+                {"sync_status": "rejected", "retryable": False}
+            ), 400
+
+        client_transaction_id = data.get("client_transaction_id")
+        if not isinstance(client_transaction_id, str) or not client_transaction_id.strip():
+            return Response.error_response(
+                "VALIDATION_ERROR",
+                "A client-generated transaction ID is required for offline synchronization",
+                {"sync_status": "rejected", "retryable": False}
+            ), 400
+
+        response, status = self.create_sale()
+        if status >= 400:
+            if isinstance(response, dict) and isinstance(response.get("error"), dict):
+                response["error"]["fields"].setdefault("sync_status", "rejected")
+                response["error"]["fields"].setdefault(
+                    "retryable",
+                    status >= 500 or status == 409
+                )
+            return response, status
+
+        # create_sale uses the same inventory, price, payment and audit
+        # transaction as online sales. A queued client record becomes confirmed
+        # only when the server returns accepted/already_processed.
+        response["data"]["sync_status"] = "accepted" if status == 201 else "already_processed"
+        response["data"]["client_transaction_id"] = client_transaction_id.strip()
+        return response, status
+
+    def _sale_matches_retry(self, sale, data):
+        """Prevent an idempotency key from silently referring to another sale."""
+        if data.get("payment_method") != sale.payment_method:
+            return False
+        if data.get("customer_id") != sale.customer_id:
+            return False
+
+        amount_paid_input = data.get("amount_paid")
+        if amount_paid_input is not None:
+            try:
+                if Decimal(str(amount_paid_input)) != Decimal(str(sale.amount_paid)):
+                    return False
+            except (ArithmeticError, ValueError, TypeError):
+                return False
+
+        requested_items = data.get("items")
+        if not isinstance(requested_items, list):
+            return False
+
+        saved_items = SaleItem.query.filter_by(sale_id=sale.id).order_by(SaleItem.id).all()
+        if len(requested_items) != len(saved_items):
+            return False
+
+        for requested, saved in zip(requested_items, saved_items):
+            if not isinstance(requested, dict):
+                return False
+            if requested.get("product_id") != saved.product_id:
+                return False
+            if requested.get("quantity") != saved.quantity:
+                return False
+            if requested.get("unit_id") != saved.unit_id:
+                return False
+            # Editable prices are supported only for service products. When
+            # supplied on a retry, require the same recorded unit price.
+            if requested.get("unit_price") is not None:
+                try:
+                    if Decimal(str(requested["unit_price"])) != Decimal(str(saved.price_at_sale)):
+                        return False
+                except (ArithmeticError, ValueError, TypeError):
+                    return False
+
+        return True
 
     def add_payment(self):
         data = request.get_json(silent=True)
@@ -553,6 +774,8 @@ class SalesService:
                         {}
                     ), 404
 
+            previous_amount_paid = sale.amount_paid
+            previous_balance = sale.balance
             payment = SalePayment(
                 sale_id=sale.id,
                 amount=amount,
@@ -566,6 +789,15 @@ class SalesService:
             if customer is not None:
                 customer.outstanding_balance -= amount
 
+            AuditService.record(
+                store_id=store_id,
+                action_type="SALE_PAYMENT_RECORDED",
+                entity_type="sale_payment",
+                entity_id=client_transaction_id,
+                before={"sale_amount_paid": str(previous_amount_paid), "sale_balance": str(previous_balance)},
+                after={"sale_amount_paid": str(sale.amount_paid), "sale_balance": str(sale.balance)},
+                details={"sale_id": sale.id, "amount": str(amount), "payment_method": payment_method},
+            )
             db.session.commit()
             return self._response(sale, "SALE_PAYMENT_RECORDED"), 200
 
@@ -681,6 +913,9 @@ class SalesService:
 
         payment_method = request.args.get("payment_method")
         group_by = request.args.get("group_by")
+        category_id_raw = request.args.get("category_id")
+        start_date_raw = request.args.get("start_date")
+        end_date_raw = request.args.get("end_date")
 
         if payment_method is not None and payment_method not in Sale.PAYMENT_METHODS:
             return Response.error_response(
@@ -696,25 +931,99 @@ class SalesService:
                 {}
             ), 400
 
-        sales_query = Sale.query.filter(
-            Sale.store_id == store_id
-        )
+        category_id = None
+        if category_id_raw is not None:
+            try:
+                category_id = int(category_id_raw)
+            except (TypeError, ValueError):
+                category_id = None
+            if category_id is None or category_id <= 0:
+                return Response.error_response(
+                    "VALIDATION_ERROR",
+                    "Category ID must be a positive integer",
+                    {}
+                ), 400
+            category = Category.query.filter_by(
+                id=category_id,
+                store_id=store_id,
+            ).first()
+            if not category:
+                return Response.error_response(
+                    "CATEGORY_NOT_FOUND",
+                    "Category not found",
+                    {}
+                ), 404
+
+        try:
+            from datetime import date
+            if any(
+                raw is not None and (
+                    len(raw) != 10 or raw[4:5] != "-" or raw[7:8] != "-"
+                )
+                for raw in (start_date_raw, end_date_raw)
+            ):
+                raise ValueError("Dates must use YYYY-MM-DD format")
+            start_date = date.fromisoformat(start_date_raw) if start_date_raw else None
+            end_date = date.fromisoformat(end_date_raw) if end_date_raw else None
+        except (TypeError, ValueError):
+            return Response.error_response(
+                "VALIDATION_ERROR",
+                "Dates must use YYYY-MM-DD format",
+                {}
+            ), 400
+
+        if start_date and end_date and start_date > end_date:
+            return Response.error_response(
+                "VALIDATION_ERROR",
+                "start_date must be on or before end_date",
+                {}
+            ), 400
+
+        sales_query = Sale.query.filter(Sale.store_id == store_id)
 
         if payment_method is not None:
-            sales_query = sales_query.filter(
-                Sale.payment_method == payment_method
+            sales_query = sales_query.filter(Sale.payment_method == payment_method)
+
+        # Date filters are calendar dates in Africa/Lagos. Convert them to UTC
+        # half-open bounds so records at the end of the selected day are included.
+        from server.app.utils.time import utc_bounds_for_lagos_date
+        if start_date:
+            start_utc, _ = utc_bounds_for_lagos_date(start_date)
+            sales_query = sales_query.filter(Sale.created_at >= start_utc)
+        if end_date:
+            _, end_utc = utc_bounds_for_lagos_date(end_date)
+            sales_query = sales_query.filter(Sale.created_at < end_utc)
+
+        if category_id is not None:
+            matching_sale_ids = (
+                db.session.query(SaleItem.sale_id)
+                .join(Product, Product.id == SaleItem.product_id)
+                .filter(
+                    Product.store_id == store_id,
+                    Product.category_id == category_id,
+                )
+                .distinct()
             )
+            # A sale with multiple lines in the selected category is still one
+            # transaction. Totals remain the full sale totals, not partial line totals.
+            sales_query = sales_query.filter(Sale.id.in_(matching_sale_ids))
 
         if group_by == "payment_method":
             grouped_sales = sales_query.with_entities(
                 Sale.payment_method,
                 func.count(Sale.id).label("sales_count"),
                 func.coalesce(func.sum(Sale.total_amount), 0).label("total_sales")
-            ).group_by(
-                Sale.payment_method
-            ).order_by(
-                Sale.payment_method.asc()
-            ).all()
+            ).group_by(Sale.payment_method).order_by(Sale.payment_method.asc()).all()
+            filtered_sales = sales_query.with_entities(Sale.id, Sale.payment_method).all()
+            refunds_by_sale = dict(
+                db.session.query(Refund.sale_id, func.sum(Refund.amount))
+                .filter(Refund.sale_id.in_([sale_id for sale_id, _ in filtered_sales]))
+                .group_by(Refund.sale_id)
+                .all()
+            ) if filtered_sales else {}
+            method_refunds = {}
+            for sale_id, method in filtered_sales:
+                method_refunds[method] = method_refunds.get(method, Decimal("0.00")) + Decimal(str(refunds_by_sale.get(sale_id, 0) or 0))
 
             return Response.success_response(
                 {
@@ -723,7 +1032,9 @@ class SalesService:
                         {
                             "payment_method": method,
                             "sales_count": int(count),
-                            "total_sales": str(total)
+                            "total_sales": str(total),
+                            "total_refunds": str(method_refunds.get(method, Decimal("0.00"))),
+                            "net_sales": str(Decimal(str(total)) - method_refunds.get(method, Decimal("0.00"))),
                         }
                         for method, count, total in grouped_sales
                     ]
@@ -731,24 +1042,83 @@ class SalesService:
                 "SALES_GROUPED"
             ), 200
 
-        sales = sales_query.order_by(Sale.created_at.desc()).all()
+        sales = sales_query.order_by(Sale.created_at.desc(), Sale.id.desc()).all()
+        sale_ids = [sale.id for sale in sales]
+        refunds_by_sale = dict(
+            db.session.query(Refund.sale_id, func.sum(Refund.amount))
+            .filter(Refund.sale_id.in_(sale_ids))
+            .group_by(Refund.sale_id)
+            .all()
+        ) if sale_ids else {}
+        export_sales = []
+        for sale in sales:
+            refunded_amount = Decimal(str(refunds_by_sale.get(sale.id, 0) or 0))
+            sale_items = (
+                db.session.query(SaleItem, Product)
+                .join(Product, Product.id == SaleItem.product_id)
+                .filter(SaleItem.sale_id == sale.id)
+                .order_by(SaleItem.id.asc())
+                .all()
+            )
+            customer = db.session.get(Customer, sale.customer_id) if sale.customer_id else None
+            export_sales.append({
+                "id": sale.id,
+                "client_transaction_id": sale.client_transaction_id,
+                "customer_id": sale.customer_id,
+                "customer_name": customer.name if customer else None,
+                "total_amount": str(sale.total_amount),
+                "amount_paid": str(sale.amount_paid),
+                "balance": str(sale.balance),
+                "refunded_amount": str(refunded_amount),
+                "net_amount": str(Decimal(str(sale.total_amount)) - refunded_amount),
+                "payment_method": sale.payment_method,
+                "created_at": sale.created_at.isoformat(),
+                "items": [
+                    {
+                        "product_id": item.product_id,
+                        "product_name": product.name,
+                        "category_id": product.category_id,
+                        "category_name": (
+                            db.session.get(Category, product.category_id).name
+                            if product.category_id and db.session.get(Category, product.category_id)
+                            else None
+                        ),
+                        "quantity": item.quantity,
+                        "unit_name": item.unit_name_at_sale,
+                        "unit_base_quantity": item.unit_base_quantity,
+                        "price_at_sale": str(item.price_at_sale),
+                        "line_total": str(item.total),
+                    }
+                    for item, product in sale_items
+                ],
+            })
+
+        total_sales = sum((Decimal(str(sale.total_amount)) for sale in sales), Decimal("0.00"))
+        total_paid = sum((Decimal(str(sale.amount_paid)) for sale in sales), Decimal("0.00"))
+        total_balance = sum((Decimal(str(sale.balance)) for sale in sales), Decimal("0.00"))
+        total_refunds = sum((Decimal(str(value)) for value in refunds_by_sale.values()), Decimal("0.00"))
+        net_sales = total_sales - total_refunds
+        net_amount_paid = total_paid - total_refunds
 
         return Response.success_response(
             {
                 "payment_method": payment_method,
-                "sales": [
-                    {
-                        "id": sale.id,
-                        "client_transaction_id": sale.client_transaction_id,
-                        "customer_id": sale.customer_id,
-                        "total_amount": str(sale.total_amount),
-                        "amount_paid": str(sale.amount_paid),
-                        "balance": str(sale.balance),
-                        "payment_method": sale.payment_method,
-                        "created_at": sale.created_at.isoformat()
-                    }
-                    for sale in sales
-                ]
+                "filters": {
+                    "start_date": start_date.isoformat() if start_date else None,
+                    "end_date": end_date.isoformat() if end_date else None,
+                    "category_id": category_id,
+                    "payment_method": payment_method,
+                },
+                "summary": {
+                    "transaction_count": len(sales),
+                    "total_sales": str(total_sales),
+                    "total_amount_paid": str(total_paid),
+                    "total_balance": str(total_balance),
+                    "total_refunds": str(total_refunds),
+                    "net_sales": str(net_sales),
+                    "net_amount_paid": str(net_amount_paid),
+                },
+                "sales": export_sales,
             },
             "SALES_RETRIEVED"
         ), 200

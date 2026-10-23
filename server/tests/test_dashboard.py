@@ -1,4 +1,6 @@
 from server.app.extensions import db
+from server.app.models.alert import Alert, AlertType
+from server.app.models.product import Product
 from server.app.models.sale import Sale
 
 from datetime import datetime, timedelta, timezone
@@ -311,3 +313,89 @@ def test_daily_summary_uses_africa_lagos_day_boundaries(client):
     data = response.json["data"]
     assert data["sales_count"] == 1
     assert data["total_sales"] == "2500.00"
+
+
+
+def test_services_are_excluded_from_inventory_recommendations_and_legacy_alerts(client):
+    store_id = register_and_login(client, username="s14-inventory-user")
+
+    physical_response = client.post(
+        "/product/create",
+        json={
+            "store_id": store_id,
+            "name": "Low Stock Rice",
+            "price": 1000,
+            "opening_stock": 1,
+            "low_stock_threshold": 5,
+        },
+    )
+    assert physical_response.status_code == 201
+    physical_id = physical_response.json["data"]["product"]["id"]
+
+    service_response = client.post(
+        "/product/create",
+        json={
+            "store_id": store_id,
+            "name": "Haircut",
+            "product_type": "Service",
+            "price": 1000,
+        },
+    )
+    assert service_response.status_code == 201
+    service_id = service_response.json["data"]["product"]["id"]
+
+    # Simulate a legacy row and alert created before service inventory was forbidden.
+    service = db.session.get(Product, service_id)
+    service.stock_quantity = 1
+    service.low_stock_threshold = 5
+    legacy_alert = Alert(
+        store_id=store_id,
+        product_id=service_id,
+        type=AlertType.LOW_STOCK,
+        message="Haircut is low on stock",
+    )
+    db.session.add(legacy_alert)
+    db.session.commit()
+
+    dashboard_response = client.get(f"/dashboard?store_id={store_id}")
+    assert dashboard_response.status_code == 200
+    dashboard = dashboard_response.json["data"]
+    assert dashboard["low_stock_count"] == 1
+    assert dashboard["open_alerts_count"] == 1
+
+    brief_response = client.get(f"/dashboard/daily-brief?store_id={store_id}")
+    assert brief_response.status_code == 200
+    brief = brief_response.json["data"]
+    assert [item["product_id"] for item in brief["insights"]["restock_recommendations"]] == [
+        physical_id
+    ]
+    assert all(alert["product_id"] != service_id for alert in brief["alerts"])
+
+    alerts_response = client.get(f"/alerts?store_id={store_id}")
+    assert alerts_response.status_code == 200
+    assert all(alert["product_id"] != service_id for alert in alerts_response.json["data"]["alerts"])
+
+    generation_response = client.post(f"/alerts/generate-low-stock?store_id={store_id}")
+    assert generation_response.status_code == 200
+    db.session.refresh(legacy_alert)
+    assert legacy_alert.is_resolved is True
+    assert generation_response.json["data"]["created_alerts"] == []
+
+    service_read = client.get(f"/product/get?store_id={store_id}&id={service_id}")
+    assert service_read.status_code == 200
+    service_data = service_read.json["data"]["product"]
+    assert service_data["stock_quantity"] == 0
+    assert service_data["low_stock_threshold"] is None
+    assert service_data["stock"]["quantity"] == 0
+    assert service_data["stock"]["low_stock_threshold"] is None
+
+    update_response = client.patch(
+        "/product/update",
+        json={"store_id": store_id, "id": service_id, "name": "Haircut Service"},
+    )
+    assert update_response.status_code == 200
+    db.session.refresh(service)
+    db.session.refresh(legacy_alert)
+    assert service.stock_quantity == 0
+    assert service.low_stock_threshold is None
+    assert legacy_alert.is_resolved is True

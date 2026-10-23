@@ -42,6 +42,8 @@ def validate_non_negative_number(value, field_name):
         number = Decimal(str(value))
     except (InvalidOperation, ValueError, TypeError):
         return f"{field_name} must be a valid number"
+    if not number.is_finite():
+        return f"{field_name} must be a finite number"
     if number < 0:
         return f"{field_name} must be zero or greater"
     return None

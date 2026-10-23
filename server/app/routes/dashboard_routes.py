@@ -12,6 +12,12 @@ def dashboard():
     return insight.dashboard(request.args.get("store_id", type=int))
 
 
+@dashboard_bp.route("/rankings", methods=["GET"])
+@require_session
+def dashboard_rankings():
+    return insight.dashboard_rankings(request.args.get("store_id", type=int))
+
+
 @dashboard_bp.route("/daily-summary", methods=["GET"])
 @require_session
 def daily_summary():

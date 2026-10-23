@@ -100,6 +100,11 @@ class CustomerService:
                 }
             ), 400
 
+        from server.app.services.subscription_service import SubscriptionService
+        limit_error = SubscriptionService.check_limit(store_id, "customers")
+        if limit_error:
+            return limit_error
+
         customer = Customer(
             store_id=store_id,
             name=name.strip(),
