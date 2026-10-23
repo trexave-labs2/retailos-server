@@ -1,3 +1,6 @@
+from datetime import datetime, timedelta, timezone
+
+from server.app.extensions import db
 from server.app.models.store import Store
 
 
@@ -180,3 +183,65 @@ def test_unsupported_billing_interval_is_rejected(client):
     )
     assert response.status_code == 400
     assert response.json["error"]["code"] == "INVALID_BILLING_INTERVAL"
+
+
+
+def test_free_plan_monthly_sales_limit_is_enforced_after_grace_period(client, monkeypatch):
+    from server.app.services.subscription_service import PLAN_CATALOG
+    from server.app.models.store import Store
+
+    store_id = register_and_login(client)
+    product = client.post(
+        "/product/create",
+        json={
+            "store_id": store_id,
+            "name": "Monthly limit product",
+            "price": 100,
+            "opening_stock": 5,
+        },
+    )
+    assert product.status_code == 201
+    product_id = product.json["data"]["product"]["id"]
+
+    monkeypatch.setitem(PLAN_CATALOG["free"]["limits"], "sales_per_month", 0)
+    store = db.session.get(Store, store_id)
+    store.sales_limit_grace_started_at = datetime.now(timezone.utc) - timedelta(hours=25)
+    db.session.commit()
+
+    response = client.post(
+        "/sales",
+        json={
+            "store_id": store_id,
+            "payment_method": "Cash",
+            "items": [{"product_id": product_id, "quantity": 1}],
+            "client_transaction_id": "monthly-sales-limit",
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.json["error"]["code"] == "PLAN_LIMIT_REACHED"
+    assert response.json["error"]["fields"]["resource"] == "sales_per_month"
+
+
+def test_free_plan_cannot_access_advanced_reporting(client):
+    store_id = register_and_login(client)
+
+    rankings = client.get(f"/dashboard/rankings?store_id={store_id}")
+    time_series = client.get(f"/dashboard/time-series?store_id={store_id}")
+
+    for response in (rankings, time_series):
+        assert response.status_code == 403
+        assert response.json["error"]["code"] == "FEATURE_NOT_AVAILABLE"
+        assert response.json["error"]["fields"]["feature"] == "advanced_reporting"
+
+
+def test_pro_trial_can_access_advanced_reporting(client):
+    store_id = register_and_login(client)
+    trial = client.post("/subscriptions/trial", json={"store_id": store_id})
+    assert trial.status_code == 200
+
+    rankings = client.get(f"/dashboard/rankings?store_id={store_id}")
+    time_series = client.get(f"/dashboard/time-series?store_id={store_id}")
+
+    assert rankings.status_code == 200
+    assert time_series.status_code == 200

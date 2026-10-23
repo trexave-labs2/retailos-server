@@ -24,6 +24,11 @@ def register_and_login(client):
     return response.json["data"]["user"]["store_id"]
 
 
+def start_pro_trial(client, store_id):
+    response = client.post("/subscriptions/trial", json={"store_id": store_id})
+    assert response.status_code == 200, response.get_json()
+
+
 def create_product(client, store_id, name, product_type="Physical"):
     payload = {
         "store_id": store_id,
@@ -56,6 +61,7 @@ def create_sale(client, store_id, product_id, transaction_id, quantity=1):
 
 def test_rankings_separate_physical_products_and_services_for_selected_period(client):
     store_id = register_and_login(client)
+    start_pro_trial(client, store_id)
     rice_id = create_product(client, store_id, "Rice")
     eggs_id = create_product(client, store_id, "Eggs")
     haircut_id = create_product(client, store_id, "Haircut", "Service")
@@ -88,6 +94,7 @@ def test_rankings_separate_physical_products_and_services_for_selected_period(cl
 
 def test_rankings_subtract_recorded_product_returns_and_exclude_fully_refunded_service(client):
     store_id = register_and_login(client)
+    start_pro_trial(client, store_id)
     physical_id = create_product(client, store_id, "Soap")
     service_id = create_product(client, store_id, "Repair", "Service")
 
@@ -138,6 +145,7 @@ def test_rankings_subtract_recorded_product_returns_and_exclude_fully_refunded_s
 
 def test_rankings_return_empty_lists_when_period_has_no_qualifying_sales(client):
     store_id = register_and_login(client)
+    start_pro_trial(client, store_id)
     today = current_lagos_date()
     empty_period = (today - timedelta(days=10)).isoformat()
 
@@ -154,6 +162,7 @@ def test_rankings_return_empty_lists_when_period_has_no_qualifying_sales(client)
 
 def test_rankings_reject_incomplete_or_reversed_period(client):
     store_id = register_and_login(client)
+    start_pro_trial(client, store_id)
 
     incomplete = client.get(
         f"/dashboard/rankings?store_id={store_id}&start_date=2026-10-01"

@@ -357,6 +357,25 @@ class SubscriptionService:
         ), 200
 
     @staticmethod
+    def check_feature(store_id, feature):
+        """Return a standard API error tuple when a store lacks a feature."""
+        store = db.session.get(Store, store_id)
+        if not store:
+            return None
+        plan = SubscriptionService._effective_plan(store)
+        if plan.get("features", {}).get(feature, False):
+            return None
+        return Response.error_response(
+            "FEATURE_NOT_AVAILABLE",
+            f"The {feature.replace('_', ' ')} feature is not available on the {plan['name']} plan",
+            {
+                "feature": feature,
+                "current_plan": plan["id"],
+                "upgrade_available": plan["id"] != "pro",
+            },
+        ), 403
+
+    @staticmethod
     def check_limit(store_id, resource):
         """Return a standard API error tuple when a Free-plan limit is reached."""
         store = db.session.get(Store, store_id)

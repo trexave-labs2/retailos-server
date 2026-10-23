@@ -189,6 +189,11 @@ class InsightService:
                 {},
             ), 403
 
+        from server.app.services.subscription_service import SubscriptionService
+        feature_error = SubscriptionService.check_feature(store_id, "advanced_reporting")
+        if feature_error:
+            return feature_error
+
         start_date, end_date, start_utc, end_utc, error = self._ranking_period()
         if error:
             return error
@@ -266,6 +271,11 @@ class InsightService:
                 "You do not have access to this store",
                 {},
             ), 403
+
+        from server.app.services.subscription_service import SubscriptionService
+        feature_error = SubscriptionService.check_feature(store_id, "advanced_reporting")
+        if feature_error:
+            return feature_error
 
         start_date, end_date, start_utc, end_utc, error = self._ranking_period()
         if error:

@@ -79,6 +79,11 @@ def create_sale(
     return response.json["data"]["receipt"]["sale_id"]
 
 
+def start_pro_trial(client, store_id):
+    response = client.post("/subscriptions/trial", json={"store_id": store_id})
+    assert response.status_code == 200, response.get_json()
+
+
 def test_dashboard_returns_store_metrics(client):
     store_id = register_and_login(client)
 
@@ -398,6 +403,7 @@ def test_services_are_excluded_from_inventory_recommendations_and_legacy_alerts(
 
 def test_dashboard_time_series_compares_physical_products_and_services(client):
     store_id = register_and_login(client, username="dashboard-series-user")
+    start_pro_trial(client, store_id)
 
     physical = client.post(
         "/product/create",
@@ -465,6 +471,7 @@ def test_dashboard_time_series_compares_physical_products_and_services(client):
 
 def test_dashboard_time_series_validates_selected_period(client):
     store_id = register_and_login(client, username="dashboard-series-validation")
+    start_pro_trial(client, store_id)
 
     response = client.get(
         f"/dashboard/time-series?store_id={store_id}&start_date=2026-10-20"
@@ -493,3 +500,105 @@ def test_dashboard_time_series_denies_another_store(client):
         f"/dashboard/time-series?store_id={first_store_id}&start_date={today}&end_date={today}"
     )
     assert response.status_code == 403
+
+
+
+def _record_refund(store_id, sale_id, amount, transaction_id, created_at=None):
+    from server.app.models.refund import Refund
+
+    refund = Refund(
+        store_id=store_id,
+        sale_id=sale_id,
+        amount=amount,
+        refund_type="Partial",
+        reason="Dashboard calculation regression test",
+        payment_method="Cash",
+        reference=f"RFD-{transaction_id}",
+        client_transaction_id=transaction_id,
+        created_at=created_at or datetime.now(timezone.utc),
+    )
+    db.session.add(refund)
+    db.session.commit()
+    return refund
+
+
+def test_dashboard_daily_brief_and_summary_subtract_refunds_in_their_recorded_day(client):
+    store_id = register_and_login(client, username="dashboard-net-refund-user")
+    today_sale_id = create_sale(client, store_id, "dashboard-net-refund-today")
+    yesterday_sale_id = create_sale(client, store_id, "dashboard-net-refund-yesterday")
+
+    today = current_lagos_date()
+    today_start, _ = utc_bounds_for_lagos_date(today)
+    yesterday_start, _ = utc_bounds_for_lagos_date(today - timedelta(days=1))
+
+    today_sale = db.session.get(Sale, today_sale_id)
+    yesterday_sale = db.session.get(Sale, yesterday_sale_id)
+    today_sale.created_at = today_start + timedelta(hours=1)
+    yesterday_sale.created_at = yesterday_start + timedelta(hours=1)
+    db.session.commit()
+
+    _record_refund(
+        store_id,
+        today_sale_id,
+        "1000.00",
+        "dashboard-refund-today",
+        created_at=today_start + timedelta(hours=2),
+    )
+    _record_refund(
+        store_id,
+        yesterday_sale_id,
+        "500.00",
+        "dashboard-refund-yesterday",
+        created_at=yesterday_start + timedelta(hours=2),
+    )
+
+    dashboard_response = client.get(f"/dashboard?store_id={store_id}")
+    summary_response = client.get(f"/dashboard/daily-summary?store_id={store_id}")
+    brief_response = client.get(f"/dashboard/daily-brief?store_id={store_id}")
+
+    assert dashboard_response.status_code == 200
+    assert dashboard_response.json["data"]["today_sales_count"] == 1
+    assert dashboard_response.json["data"]["today_sales_total"] == "4000.00"
+
+    assert summary_response.status_code == 200
+    summary = summary_response.json["data"]
+    assert summary["gross_sales"] == "5000.00"
+    assert summary["total_refunds"] == "1000.00"
+    assert summary["total_sales"] == "4000.00"
+
+    assert brief_response.status_code == 200
+    sales = brief_response.json["data"]["sales"]
+    assert sales["today_total"] == "4000.00"
+    assert sales["yesterday_total"] == "4500.00"
+    assert sales["change_percent"] == "-11.11"
+    assert sales["status"] == "DOWN"
+
+
+def test_dashboard_time_series_uses_local_date_for_sale_and_refund_periods(client):
+    store_id = register_and_login(client, username="dashboard-series-refund-period-user")
+    start_pro_trial(client, store_id)
+    sale_id = create_sale(client, store_id, "dashboard-series-refund-period")
+    today = current_lagos_date()
+    start_utc, _ = utc_bounds_for_lagos_date(today)
+    sale = db.session.get(Sale, sale_id)
+    sale.created_at = start_utc + timedelta(hours=1)
+    db.session.commit()
+
+    _record_refund(
+        store_id,
+        sale_id,
+        "750.00",
+        "dashboard-series-refund-period-key",
+        created_at=start_utc + timedelta(hours=2),
+    )
+
+    response = client.get(
+        f"/dashboard/time-series?store_id={store_id}"
+        f"&start_date={today.isoformat()}&end_date={today.isoformat()}"
+    )
+
+    assert response.status_code == 200
+    point = response.json["data"]["series"][0]
+    assert point["gross_sales"] == "5000.00"
+    assert point["refunds"] == "750.00"
+    assert point["net_sales"] == "4250.00"
