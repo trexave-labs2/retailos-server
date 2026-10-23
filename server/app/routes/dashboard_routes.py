@@ -18,6 +18,12 @@ def dashboard_rankings():
     return insight.dashboard_rankings(request.args.get("store_id", type=int))
 
 
+@dashboard_bp.route("/time-series", methods=["GET"])
+@require_session
+def dashboard_time_series():
+    return insight.dashboard_time_series(request.args.get("store_id", type=int))
+
+
 @dashboard_bp.route("/daily-summary", methods=["GET"])
 @require_session
 def daily_summary():

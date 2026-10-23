@@ -51,9 +51,12 @@ def test_service_sale_does_not_change_inventory_or_create_stock_alerts(client):
     assert db.session.get(Product, service_id).stock_quantity == 0
     assert InventoryMovement.query.filter_by(product_id=service_id).count() == 0
 
-    generated = client.post(f"/alerts/generate-low-stock?store_id={store_id}")
-    assert generated.status_code == 200
-    assert generated.json["data"]["created_alerts"] == []
+    alerts_response = client.get(f"/alerts?store_id={store_id}")
+    assert alerts_response.status_code == 200
+    assert all(
+        alert["product_id"] != service_id
+        for alert in alerts_response.json["data"]["alerts"]
+    )
     assert Alert.query.filter_by(product_id=service_id, is_resolved=False).count() == 0
 
 
@@ -92,11 +95,14 @@ def test_service_legacy_stock_values_do_not_create_alerts_or_decrement_on_sale(c
     assert listed.status_code == 200
     assert all(alert["product_id"] != service_id for alert in listed.json["data"]["alerts"])
 
-    generated = client.post(f"/alerts/generate-low-stock?store_id={store_id}")
-    assert generated.status_code == 200
-    assert generated.json["data"]["created_alerts"] == []
+    alerts_response = client.get(f"/alerts?store_id={store_id}")
+    assert alerts_response.status_code == 200
+    assert all(
+        alert["product_id"] != service_id
+        for alert in alerts_response.json["data"]["alerts"]
+    )
     legacy_alert = Alert.query.filter_by(product_id=service_id).one()
-    assert legacy_alert.is_resolved is True
+    assert legacy_alert.is_resolved is False
 
     sale = client.post(
         "/sales",

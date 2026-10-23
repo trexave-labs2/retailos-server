@@ -3,9 +3,11 @@ from flask import Blueprint
 
 from server.app.middleware.auth_middleware import require_session
 from server.app.services.product_service import ProductService
+from server.app.services.csv_import_service import CsvImportService
 
 
 product = ProductService()
+csv_import = CsvImportService()
 product_bp = Blueprint("product", __name__)
 
 
@@ -49,3 +51,9 @@ def adjust_stock():
 @require_session
 def list_inventory_movements():
     return product.list_inventory_movements()
+
+
+@product_bp.route("/import", methods=["POST"])
+@require_session
+def import_products_csv():
+    return csv_import.import_csv()

@@ -12,19 +12,19 @@ def list_alerts():
     return alerts.list_alerts()
 
 
-@alert_bp.route("/generate-low-stock", methods=["POST"])
+@alert_bp.route("/read", methods=["PATCH", "POST"])
 @require_session
-def generate_low_stock():
-    return alerts.generate_low_stock_alerts()
+def mark_alert_read():
+    return alerts.mark_alert_read()
+
+
+@alert_bp.route("/dismiss", methods=["POST", "PATCH"])
+@require_session
+def dismiss_alert():
+    return alerts.dismiss_alert()
 
 
 @alert_bp.route("/resolve", methods=["POST"])
 @require_session
 def resolve_alert():
     return alerts.resolve_alert()
-
-
-@alert_bp.route("/delete", methods=["DELETE"])
-@require_session
-def delete_alert():
-    return alerts.delete_alert()

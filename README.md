@@ -170,6 +170,24 @@ Stock quantities, low-stock thresholds and inventory movement quantities are alw
 
 Existing products are migrated with `piece`, and the product-unit migration seeds a matching unit with conversion quantity 1 without changing existing stock quantities. Once stock or inventory history exists, changing a product's base unit is rejected because it would reinterpret saved quantities. Service products can be sold without stock deduction, so their stock quantity is ignored during sale processing.
 
+### Import products and services from CSV
+
+**POST** `/product/import` (authenticated multipart form upload)
+
+Send `store_id` and a CSV file in the multipart fields `store_id` and `file`. Files must be UTF-8 CSV, no larger than 2 MiB, with at most 1,000 data rows.
+
+Supported columns:
+
+- `name` (required): non-empty product or service name.
+- `price` (required): non-negative amount with at most two decimal places.
+- `product_type` (optional): `Physical` or `Service`; defaults to `Physical`.
+- `category_id` (optional): category ID belonging to the same store and matching the row's item type.
+- `base_unit` (optional): base inventory/selling unit; defaults to `piece`.
+- `opening_stock` (optional): non-negative integer; defaults to zero and must be zero for services.
+- `low_stock_threshold` (optional): positive integer for physical products only.
+
+Unknown or duplicate columns, missing required columns, malformed CSV, invalid encoding, unsupported file types, and oversized files are rejected before processing. Invalid data rows are reported with their CSV row number and reason while valid rows are imported. The response includes `created_count`, `failed_count`, created record details, and row errors. Each valid row is committed independently, so a bad row does not roll back other successful rows. Services are saved with zero stock and no low-stock threshold.
+
 ### Get one product
 
 **GET** `/product/get?id=1&store_id=1`

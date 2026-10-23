@@ -7,6 +7,7 @@ from sqlalchemy.exc import IntegrityError
 
 from server.app.extensions import db
 from server.app.services.audit_service import AuditService
+from server.app.services.alert_service import AlertService
 from server.app.models.inventory_movement import InventoryMovement
 from server.app.models.product import Product
 from server.app.models.refund import Refund, RefundItem
@@ -318,6 +319,7 @@ class RefundService:
                     reason=f"Refund {refund.reference} for sale #{sale.id}",
                     created_at=now_utc(),
                 ))
+                AlertService().sync_low_stock_alert(product)
 
             AuditService.record(
                 store_id=store_id,

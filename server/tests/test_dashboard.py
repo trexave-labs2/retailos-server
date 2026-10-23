@@ -375,12 +375,6 @@ def test_services_are_excluded_from_inventory_recommendations_and_legacy_alerts(
     assert alerts_response.status_code == 200
     assert all(alert["product_id"] != service_id for alert in alerts_response.json["data"]["alerts"])
 
-    generation_response = client.post(f"/alerts/generate-low-stock?store_id={store_id}")
-    assert generation_response.status_code == 200
-    db.session.refresh(legacy_alert)
-    assert legacy_alert.is_resolved is True
-    assert generation_response.json["data"]["created_alerts"] == []
-
     service_read = client.get(f"/product/get?store_id={store_id}&id={service_id}")
     assert service_read.status_code == 200
     service_data = service_read.json["data"]["product"]
@@ -399,3 +393,103 @@ def test_services_are_excluded_from_inventory_recommendations_and_legacy_alerts(
     assert service.stock_quantity == 0
     assert service.low_stock_threshold is None
     assert legacy_alert.is_resolved is True
+
+
+
+def test_dashboard_time_series_compares_physical_products_and_services(client):
+    store_id = register_and_login(client, username="dashboard-series-user")
+
+    physical = client.post(
+        "/product/create",
+        json={
+            "store_id": store_id,
+            "name": "Rice",
+            "product_type": "Physical",
+            "price": 2500,
+            "opening_stock": 10,
+            "low_stock_threshold": 2,
+        },
+    )
+    service = client.post(
+        "/product/create",
+        json={
+            "store_id": store_id,
+            "name": "Delivery",
+            "product_type": "Service",
+            "price": 1200,
+        },
+    )
+    assert physical.status_code == 201
+    assert service.status_code == 201
+
+    physical_id = physical.json["data"]["product"]["id"]
+    service_id = service.json["data"]["product"]["id"]
+    create_sale(client, store_id, "dashboard-series-physical", quantity=2, product_id=physical_id)
+
+    service_sale = client.post(
+        "/sales",
+        json={
+            "store_id": store_id,
+            "payment_method": "Cash",
+            "items": [{"product_id": service_id, "quantity": 1}],
+            "client_transaction_id": "dashboard-series-service",
+        },
+    )
+    assert service_sale.status_code == 201
+
+    today = current_lagos_date().isoformat()
+    response = client.get(
+        f"/dashboard/time-series?store_id={store_id}&start_date={today}&end_date={today}"
+    )
+
+    assert response.status_code == 200
+    data = response.json["data"]
+    assert data["period"] == {
+        "start_date": today,
+        "end_date": today,
+        "timezone": "Africa/Lagos",
+    }
+    assert len(data["series"]) == 1
+    point = data["series"][0]
+    assert point["physical"]["gross_sales"] == "5000.00"
+    assert point["physical"]["units_sold"] == 2
+    assert point["physical"]["orders_count"] == 1
+    assert point["services"]["gross_sales"] == "1200.00"
+    assert point["services"]["units_sold"] == 1
+    assert point["services"]["orders_count"] == 1
+    assert point["gross_sales"] == "6200.00"
+    assert point["refunds"] == "0.00"
+    assert point["net_sales"] == "6200.00"
+    assert {item["type"] for item in data["items"]} == {"Physical", "Service"}
+
+
+def test_dashboard_time_series_validates_selected_period(client):
+    store_id = register_and_login(client, username="dashboard-series-validation")
+
+    response = client.get(
+        f"/dashboard/time-series?store_id={store_id}&start_date=2026-10-20"
+    )
+    assert response.status_code == 400
+
+    response = client.get(
+        f"/dashboard/time-series?store_id={store_id}&start_date=2026-10-22&end_date=2026-10-20"
+    )
+    assert response.status_code == 400
+
+
+def test_dashboard_time_series_requires_authentication(client):
+    response = client.get(
+        "/dashboard/time-series?store_id=1&start_date=2026-10-20&end_date=2026-10-21"
+    )
+    assert response.status_code == 401
+
+
+def test_dashboard_time_series_denies_another_store(client):
+    first_store_id = register_and_login(client, username="dashboard-series-owner-a")
+    register_and_login(client, username="dashboard-series-owner-b")
+    today = current_lagos_date().isoformat()
+
+    response = client.get(
+        f"/dashboard/time-series?store_id={first_store_id}&start_date={today}&end_date={today}"
+    )
+    assert response.status_code == 403

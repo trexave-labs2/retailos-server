@@ -15,7 +15,7 @@ from server.app.models.refund import Refund, RefundItem
 from server.app.utils.response import Response
 from server.app.services.product_service import ProductService
 from server.app.utils.store_authorization import get_authorized_store
-from server.app.utils.time import current_lagos_date, utc_bounds_for_lagos_date
+from server.app.utils.time import LAGOS, current_lagos_date, ensure_utc, utc_bounds_for_lagos_date
 
 
 class InsightService:
@@ -257,6 +257,146 @@ class InsightService:
                 "today_sales_total": str(total)
             },
             "DASHBOARD_RETRIEVED"
+        ), 200
+
+    def dashboard_time_series(self, store_id):
+        if not get_authorized_store(store_id):
+            return Response.error_response(
+                "STORE_ACCESS_DENIED",
+                "You do not have access to this store",
+                {},
+            ), 403
+
+        start_date, end_date, start_utc, end_utc, error = self._ranking_period()
+        if error:
+            return error
+
+        # Aggregate in application code so daily buckets use Africa/Lagos dates
+        # consistently on both SQLite (tests) and PostgreSQL (production).
+        sales_lines = db.session.query(Sale, SaleItem, Product).join(
+            SaleItem, SaleItem.sale_id == Sale.id
+        ).join(
+            Product, Product.id == SaleItem.product_id
+        ).filter(
+            Sale.store_id == store_id,
+            Sale.created_at >= start_utc,
+            Sale.created_at < end_utc,
+            Product.store_id == store_id,
+        ).order_by(Sale.created_at.asc(), Sale.id.asc(), SaleItem.id.asc()).all()
+
+        refunds = Refund.query.filter(
+            Refund.store_id == store_id,
+            Refund.created_at >= start_utc,
+            Refund.created_at < end_utc,
+        ).order_by(Refund.created_at.asc(), Refund.id.asc()).all()
+
+        daily = {}
+        for offset in range((end_date - start_date).days + 1):
+            day = start_date + timedelta(days=offset)
+            daily[day.isoformat()] = {
+                "date": day.isoformat(),
+                "physical": {
+                    "gross_sales": Decimal("0.00"),
+                    "units_sold": 0,
+                    "_orders": set(),
+                },
+                "services": {
+                    "gross_sales": Decimal("0.00"),
+                    "units_sold": 0,
+                    "_orders": set(),
+                },
+                "gross_sales": Decimal("0.00"),
+                "refunds": Decimal("0.00"),
+            }
+
+        item_totals = {}
+        for sale, line, product in sales_lines:
+            local_day = ensure_utc(sale.created_at).astimezone(LAGOS).date().isoformat()
+            if local_day not in daily:
+                continue
+
+            item_type = "services" if product.product_type == "Service" else "physical"
+            amount = Decimal(str(line.total or 0))
+            units = line.quantity if item_type == "services" else line.base_quantity_deducted
+            bucket = daily[local_day][item_type]
+            bucket["gross_sales"] += amount
+            bucket["units_sold"] += int(units)
+            bucket["_orders"].add(sale.id)
+            daily[local_day]["gross_sales"] += amount
+
+            key = (product.id, product.name, product.product_type)
+            if key not in item_totals:
+                item_totals[key] = {
+                    "product_id": product.id,
+                    "name": product.name,
+                    "type": product.product_type,
+                    "gross_sales": Decimal("0.00"),
+                    "units_sold": 0,
+                    "_orders": set(),
+                }
+            item_totals[key]["gross_sales"] += amount
+            item_totals[key]["units_sold"] += int(units)
+            item_totals[key]["_orders"].add(sale.id)
+
+        for refund in refunds:
+            local_day = ensure_utc(refund.created_at).astimezone(LAGOS).date().isoformat()
+            if local_day in daily:
+                daily[local_day]["refunds"] += Decimal(str(refund.amount or 0))
+
+        points = []
+        for day in daily.values():
+            physical = day["physical"]
+            services = day["services"]
+            gross = day["gross_sales"]
+            refund_total = day["refunds"]
+            points.append({
+                "date": day["date"],
+                "physical": {
+                    "gross_sales": str(physical["gross_sales"].quantize(Decimal("0.01"))),
+                    "units_sold": physical["units_sold"],
+                    "orders_count": len(physical["_orders"]),
+                },
+                "services": {
+                    "gross_sales": str(services["gross_sales"].quantize(Decimal("0.01"))),
+                    "units_sold": services["units_sold"],
+                    "orders_count": len(services["_orders"]),
+                },
+                "gross_sales": str(gross.quantize(Decimal("0.01"))),
+                "refunds": str(refund_total.quantize(Decimal("0.01"))),
+                "net_sales": str((gross - refund_total).quantize(Decimal("0.01"))),
+            })
+
+        item_breakdown = [{
+            "product_id": item["product_id"],
+            "name": item["name"],
+            "type": item["type"],
+            "gross_sales": str(item["gross_sales"].quantize(Decimal("0.01"))),
+            "units_sold": item["units_sold"],
+            "orders_count": len(item["_orders"]),
+        } for item in sorted(
+            item_totals.values(),
+            key=lambda item: (-item["gross_sales"], item["name"].casefold(), item["product_id"]),
+        )]
+
+        return Response.success_response(
+            {
+                "period": {
+                    "start_date": start_date.isoformat(),
+                    "end_date": end_date.isoformat(),
+                    "timezone": "Africa/Lagos",
+                },
+                "metrics": {
+                    "gross_sales": "Sum of sale-line totals recorded during the selected period, grouped by the item's type.",
+                    "refunds": "Refund amounts recorded during the selected period; refunds are reported separately and are not attributed to physical products or services because refund line amounts are not stored.",
+                    "net_sales": "Gross sales minus refunds recorded during the same local calendar day.",
+                    "units_sold": "Physical products use base quantity deducted; services use sale-line quantity.",
+                    "orders_count": "Distinct sales containing at least one item of that type or product.",
+                    "date_boundaries": "Inclusive Africa/Lagos calendar dates, converted to UTC half-open query bounds.",
+                },
+                "series": points,
+                "items": item_breakdown,
+            },
+            "DASHBOARD_TIME_SERIES_RETRIEVED",
         ), 200
 
     def daily_summary(self, store_id):
