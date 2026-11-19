@@ -98,7 +98,7 @@ class PlatformAdminService:
         # explicit period-end condition avoids treating stale Pro rows as paid.
         active_premium = Store.query.filter(
             Store.current_plan == "pro",
-            Store.subscription_status.in_(("active", "trial")),
+            Store.subscription_status == "active",
             or_(Store.current_period_end.is_(None), Store.current_period_end > now),
         ).count()
         active_trials = Store.query.filter(
@@ -126,7 +126,7 @@ class PlatformAdminService:
                 "sales_last_30_days": sales_30d,
             },
             "definitions": {
-                "active_premium_stores": "Stores on the Pro plan with active or trial status and no expired current_period_end. Expired periods are excluded.",
+                "active_premium_stores": "Stores on the Pro plan with active status and no expired current_period_end. Trial stores are counted separately.",
                 "active_trial_stores": "Pro stores with trial status and no expired current_period_end.",
                 "free_stores": "Stores whose stored current_plan is free or null; expired Pro rows are not silently rewritten and are reported separately by subscription details.",
                 "new_users_last_30_days": "Users created in the rolling 30 days before generated_at.",

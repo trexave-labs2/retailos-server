@@ -11,8 +11,9 @@ def create_admin(client, app, email="admin-settings@example.com"):
     with app.app_context():
         user = User.query.filter_by(email=email).one()
         user.platform_role = PLATFORM_ADMIN_ROLE
+        user.admin_password_hash = user.password_hash
         db.session.commit()
-    response = client.post("/auth/login", json={
+    response = client.post("/admin/auth/login", json={
         "email": email, "password": "test-password-123"
     })
     assert response.status_code == 200
@@ -75,12 +76,12 @@ def test_admin_can_revoke_all_sessions_and_audit(client, app):
     response = client.post("/admin/sessions/revoke-all")
     assert response.status_code == 200
     assert response.json["data"]["sessions_invalidated"] == "all"
-    # The current cookie is cleared and every previously issued cookie is stale.
+    # The current Admin cookie is cleared and every previously issued cookie is stale.
     protected = client.get("/admin/profile")
     assert protected.status_code == 401
     with app.app_context():
         user = User.query.filter_by(email="admin-settings@example.com").one()
-        assert user.session_version == 1
+        assert user.admin_session_version == 1
         audit = PlatformAuditLog.query.filter_by(
             action_type="platform_admin.sessions_revoked"
         ).one()
@@ -94,23 +95,24 @@ def test_revoke_all_rejects_request_body(client, app):
     assert response.status_code == 400
     with app.app_context():
         user = User.query.filter_by(email="admin-settings@example.com").one()
-        assert user.session_version == 0
+        assert user.admin_session_version == 0
         assert PlatformAuditLog.query.count() == 0
 
 
 def test_admin_password_change_is_audited_and_invalidates_sessions(client, app):
     create_admin(client, app)
-    response = client.post("/auth/change-password", json={
+    response = client.post("/admin/auth/change-password", json={
         "current_password": "test-password-123",
         "new_password": "a-different-password-456"
     })
     assert response.status_code == 200
     with app.app_context():
         user = User.query.filter_by(email="admin-settings@example.com").one()
-        assert user.session_version == 1
+        assert user.admin_session_version == 1
+        assert user.session_version == 0
         audit = PlatformAuditLog.query.filter_by(
             action_type="platform_admin.password_changed"
         ).one()
         assert audit.actor_user_id == user.id
-        assert audit.details == {"sessions_invalidated": True}
+        assert audit.details == {"admin_sessions_invalidated": True}
         assert "password" not in str(audit.details).lower()

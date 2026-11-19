@@ -36,7 +36,16 @@ def promote_to_admin(client, app, email):
     with app.app_context():
         user = User.query.filter_by(email=email).one()
         user.platform_role = PLATFORM_ADMIN_ROLE
+        # Preserve the current retail password as the initial Admin password,
+        # matching the existing-account promotion compatibility behavior.
+        user.admin_password_hash = user.password_hash
         db.session.commit()
+
+    admin_login = client.post("/admin/auth/login", json={
+        "email": email,
+        "password": "test-password-123",
+    })
+    assert admin_login.status_code == 200
 
 
 def create_monitor(client, name="RetailOS API", target="https://example.com/health"):
@@ -56,11 +65,12 @@ def test_all_monitoring_routes_require_platform_admin(client):
     register_and_login(client, "owner@example.com", "Store Owner")
     for path in ADMIN_PATHS:
         response = client.get(path)
-        assert response.status_code == 403, path
+        # A Client cookie is not an Admin credential, even for a retail user.
+        assert response.status_code == 401, path
 
-    assert client.post("/admin/monitors", json={}).status_code == 403
-    assert client.patch("/admin/monitors/1", json={"enabled": False}).status_code == 403
-    assert client.post("/admin/monitors/1/checks").status_code == 403
+    assert client.post("/admin/monitors", json={}).status_code == 401
+    assert client.patch("/admin/monitors/1", json={"enabled": False}).status_code == 401
+    assert client.post("/admin/monitors/1/checks").status_code == 401
 
 
 def test_admin_can_create_update_pause_resume_and_list_monitor(client, app):

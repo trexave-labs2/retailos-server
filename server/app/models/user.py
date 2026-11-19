@@ -18,6 +18,9 @@ class User(db.Model):
     password_hash: Mapped[str] = mapped_column(String)
     session_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     platform_role: Mapped[str | None] = mapped_column(String(30), nullable=True, default=None)
+    # Platform administration has credentials and revocation independent of the retail login.
+    admin_password_hash: Mapped[str | None] = mapped_column(String, nullable=True)
+    admin_session_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     account_status: Mapped[str] = mapped_column(String(24), nullable=False, default="active", server_default="active")
     deletion_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     deletion_scheduled_for: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

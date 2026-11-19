@@ -23,10 +23,11 @@ def promote(client, app, email):
     with app.app_context():
         user = User.query.filter_by(email=email).one()
         user.platform_role = PLATFORM_ADMIN_ROLE
+        user.admin_password_hash = user.password_hash
         db.session.commit()
     response = client.post("/auth/logout")
     assert response.status_code == 200
-    response = client.post("/auth/login", json={
+    response = client.post("/admin/auth/login", json={
         "email": email,
         "password": "test-password-123",
     })
@@ -50,7 +51,7 @@ def test_admin_read_endpoints_require_platform_admin(client):
     register_and_login(client, "owner@example.com", "Store Owner")
     for endpoint in ADMIN_ENDPOINTS:
         response = client.get(endpoint)
-        assert response.status_code == 403, endpoint
+        assert response.status_code == 401, endpoint
 
 
 def test_admin_can_read_overview_users_and_stores_without_sensitive_fields(
@@ -109,7 +110,7 @@ def test_admin_user_search_filter_and_pagination(client, app):
         client.post("/auth/logout")
         register_and_login(client, f"user{index}@example.com", f"User {index}")
         client.post("/auth/logout")
-        client.post("/auth/login", json={
+        client.post("/admin/auth/login", json={
             "email": "admin@example.com",
             "password": "test-password-123",
         })
@@ -163,3 +164,33 @@ def test_admin_list_rejects_invalid_filters_and_sorting(client, app):
     assert client.get("/admin/users?sort_by=password_hash").status_code == 400
     assert client.get("/admin/stores?subscription_status=unknown").status_code == 400
     assert client.get("/admin/stores?per_page=101").status_code == 400
+
+def test_active_premium_and_trial_store_metrics_are_disjoint(client, app):
+    register_and_login(client, "admin@example.com", "Platform Admin")
+    promote(client, app, "admin@example.com")
+
+    with app.app_context():
+        store = Store.query.one()
+        store.current_plan = "pro"
+        store.subscription_status = "trial"
+        store.current_period_end = datetime.now(timezone.utc) + timedelta(days=5)
+        db.session.commit()
+
+    trial_response = client.get("/admin/overview")
+    assert trial_response.status_code == 200
+    trial_metrics = trial_response.json["data"]["metrics"]
+    assert trial_metrics["active_premium_stores"] == 0
+    assert trial_metrics["active_trial_stores"] == 1
+
+    with app.app_context():
+        store = Store.query.one()
+        store.subscription_status = "active"
+        store.current_period_end = datetime.now(timezone.utc) + timedelta(days=5)
+        db.session.commit()
+
+    active_response = client.get("/admin/overview")
+    assert active_response.status_code == 200
+    active_metrics = active_response.json["data"]["metrics"]
+    assert active_metrics["active_premium_stores"] == 1
+    assert active_metrics["active_trial_stores"] == 0
+

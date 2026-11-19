@@ -1,6 +1,9 @@
 from flask import Blueprint
+from flask_limiter.util import get_remote_address
 
 from server.app.middleware.auth_middleware import require_platform_admin, require_super_admin
+from server.app.extensions import limiter
+from server.app.services.platform_admin_auth_service import PlatformAdminAuthService
 from server.app.services.platform_admin_service import PlatformAdminService
 from server.app.services.platform_admin_subscription_service import PlatformAdminSubscriptionService
 from server.app.services.platform_admin_support_service import PlatformAdminSupportService
@@ -108,3 +111,29 @@ def list_administrators():
 @require_super_admin
 def set_admin_role(user_id):
     return PlatformAdminRolesService.set_admin_role(user_id)
+
+
+# Admin authentication uses its own credential hash and cookie. It never reads
+# or clears the RetailOS Client session.
+@platform_admin_bp.post("/auth/login")
+@limiter.limit("20 per minute", key_func=get_remote_address)
+@limiter.limit("5 per minute")
+def admin_login():
+    return PlatformAdminAuthService.login()
+
+
+@platform_admin_bp.get("/auth/me")
+@require_platform_admin
+def admin_me():
+    return PlatformAdminAuthService.current_admin()
+
+
+@platform_admin_bp.post("/auth/logout")
+def admin_logout():
+    return PlatformAdminAuthService.logout()
+
+
+@platform_admin_bp.post("/auth/change-password")
+@require_platform_admin
+def admin_change_password():
+    return PlatformAdminAuthService.change_password()

@@ -2,7 +2,7 @@
 
 from datetime import date, datetime, time, timedelta, timezone
 
-from flask import request, session
+from flask import g, request
 from sqlalchemy import or_
 
 from server.app.extensions import db
@@ -177,7 +177,7 @@ class PlatformAdminSupportService:
                 "changed": False,
             }, "FEEDBACK_SUPPORT_STATUS_UNCHANGED"), 200
 
-        actor_id = session.get("user_id")
+        actor_id = g.platform_admin.id
         record.support_status = requested_status
         db.session.add(PlatformAuditLog(
             actor_user_id=actor_id,

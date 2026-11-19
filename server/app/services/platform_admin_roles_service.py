@@ -1,5 +1,5 @@
 """Super-admin-only management of platform administrator privileges."""
-from flask import request, session
+from flask import g, request
 
 from server.app.extensions import db
 from server.app.models.platform_audit_log import PlatformAuditLog
@@ -31,7 +31,7 @@ class PlatformAdminRolesService:
         if requested_role not in (PLATFORM_ADMIN_ROLE, None):
             return Response.error_response("VALIDATION_ERROR", "Only admin or null is supported", {"platform_role": "The super_admin role cannot be assigned through this endpoint"}), 400
 
-        actor_id = session.get("user_id")
+        actor_id = g.platform_admin.id
         if actor_id == user_id:
             return Response.error_response("SELF_ROLE_CHANGE_FORBIDDEN", "The super administrator cannot change their own role", {}), 400
         target = db.session.get(User, user_id)
@@ -44,6 +44,10 @@ class PlatformAdminRolesService:
             return Response.success_response({"user_id": target.id, "platform_role": target.platform_role, "changed": False}, "ADMIN_ROLE_UNCHANGED"), 200
 
         target.platform_role = requested_role
+        if requested_role == PLATFORM_ADMIN_ROLE and not target.admin_password_hash:
+            # Initial credential compatibility: the new administrator must change
+            # this password in Admin to separate it from their retail password.
+            target.admin_password_hash = target.password_hash
         action = "platform_admin.role_granted" if requested_role == PLATFORM_ADMIN_ROLE else "platform_admin.role_revoked"
         db.session.add(PlatformAuditLog(
             actor_user_id=actor_id,

@@ -29,8 +29,8 @@ Metrics:
 - `users_total`: all registered user accounts.
 - `stores_total`: all stores.
 - `active_premium_stores`: Pro stores whose subscription status is
-  `active` or `trial` and whose `current_period_end` is null or in the
-  future. An expired period is never counted as active premium.
+  `active` and whose `current_period_end` is null or in the future. Trial
+  stores are counted separately. An expired period is never counted as active premium.
 - `active_trial_stores`: Pro stores with `trial` status and a null or
   future `current_period_end`.
 - `free_stores`: stores whose persisted `current_plan` is `free` or null.

@@ -26,9 +26,10 @@ def promote(client, app, email):
     with app.app_context():
         user = User.query.filter_by(email=email).one()
         user.platform_role = PLATFORM_ADMIN_ROLE
+        user.admin_password_hash = user.password_hash
         db.session.commit()
     client.post("/auth/logout")
-    response = client.post("/auth/login", json={
+    response = client.post("/admin/auth/login", json={
         "email": email,
         "password": "test-password-123",
     })
@@ -40,8 +41,8 @@ def test_admin_subscription_endpoints_require_platform_admin(client):
     assert client.get("/admin/subscription-requests").status_code == 401
 
     register_and_login(client, "owner@example.com", "Store Owner")
-    assert client.get("/admin/subscriptions").status_code == 403
-    assert client.get("/admin/subscription-requests").status_code == 403
+    assert client.get("/admin/subscriptions").status_code == 401
+    assert client.get("/admin/subscription-requests").status_code == 401
 
 
 def test_admin_can_list_subscription_entitlements_and_pending_requests(client, app):

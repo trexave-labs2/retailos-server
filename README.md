@@ -20,6 +20,19 @@ Install:
 
     pip install -r server/requirements.txt
 
+## Separate Client and platform-admin authentication
+
+RetailOS Client and RetailOS Admin use independent credentials and sessions, even when both accounts use the same email address.
+
+- Client: `POST /auth/login`, `GET /auth/me`, and `POST /auth/logout`. Uses `users.password_hash` and the standard Flask `session` cookie.
+- Admin: `POST /admin/auth/login`, `GET /admin/auth/me`, `POST /admin/auth/logout`, and `POST /admin/auth/change-password`. Uses `users.admin_password_hash` and the independent HttpOnly `retailos_admin_session` cookie.
+- Admin session revocation and password changes update `admin_session_version`; they do not invalidate the Client session. Client password changes update the Client session version and do not change the Admin password.
+- The `025_admin_credentials` migration copies the former shared password hash for existing platform administrators so they can continue signing in. Change the Admin password in Admin Settings to make it different from the Client password.
+- The bootstrap command uses `PLATFORM_ADMIN_PASSWORD` for the Admin credential. If the email already belongs to a retail user, its Client password is preserved. If the account is newly created for platform administration, a random unusable Client password is stored so the Admin password cannot sign in to Client.
+- When a super administrator grants Admin access to an existing retail user, the initial Admin password is copied from that user's current Client password for compatibility. The new administrator should change it immediately in Admin Settings.
+
+All `/admin/*` endpoints require the Admin cookie and a server-assigned platform role. A Client session alone is never accepted for platform administration.
+
 ## Production login rate limiting
 
 Login requests use per-IP and per-IP/email limits. The default `memory://` storage is suitable only for local development and single-process testing; it is not shared between Gunicorn workers or Render instances.

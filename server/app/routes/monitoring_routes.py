@@ -1,4 +1,4 @@
-from flask import Blueprint
+from flask import Blueprint, g
 
 from server.app.middleware.auth_middleware import require_platform_admin
 from server.app.services.monitoring_service import MonitoringService
@@ -22,22 +22,19 @@ def list_monitors():
 @monitoring_bp.post("/monitors")
 @require_platform_admin
 def create_monitor():
-    from flask import session
-    return MonitoringService.create_monitor(session["user_id"])
+    return MonitoringService.create_monitor(g.platform_admin.id)
 
 
 @monitoring_bp.patch("/monitors/<int:monitor_id>")
 @require_platform_admin
 def update_monitor(monitor_id):
-    from flask import session
-    return MonitoringService.update_monitor(session["user_id"], monitor_id)
+    return MonitoringService.update_monitor(g.platform_admin.id, monitor_id)
 
 
 @monitoring_bp.post("/monitors/<int:monitor_id>/checks")
 @require_platform_admin
 def manual_check(monitor_id):
-    from flask import session
-    return MonitoringService.manual_check(session["user_id"], monitor_id)
+    return MonitoringService.manual_check(g.platform_admin.id, monitor_id)
 
 
 @monitoring_bp.get("/monitors/<int:monitor_id>/checks")

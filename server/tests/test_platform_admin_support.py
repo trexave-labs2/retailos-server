@@ -37,9 +37,10 @@ def login_admin(client, app):
     with app.app_context():
         user = User.query.filter_by(email="platform-admin@example.com").one()
         user.platform_role = PLATFORM_ADMIN_ROLE
+        user.admin_password_hash = user.password_hash
         db.session.commit()
     client.post("/auth/logout")
-    response = client.post("/auth/login", json={
+    response = client.post("/admin/auth/login", json={
         "email": "platform-admin@example.com",
         "password": "test-password-123",
     })
@@ -64,8 +65,8 @@ def test_feedback_and_platform_audit_apis_require_platform_admin(client, app, mo
     })
     assert response.status_code == 200
     for path in ("/admin/feedback", "/admin/feedback/1", "/admin/audit-logs"):
-        assert client.get(path).status_code == 403, path
-    assert client.patch("/admin/feedback/1/status", json={"support_status": "resolved"}).status_code == 403
+        assert client.get(path).status_code == 401, path
+    assert client.patch("/admin/feedback/1/status", json={"support_status": "resolved"}).status_code == 401
 
 
 def test_admin_feedback_list_filters_and_paginates(client, app, monkeypatch):

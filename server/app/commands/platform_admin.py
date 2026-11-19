@@ -1,4 +1,5 @@
 import click
+import secrets
 from flask import current_app
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
@@ -56,13 +57,15 @@ def bootstrap_platform_admin():
         if user.platform_role not in (None, PLATFORM_ADMIN_ROLE):
             raise click.ClickException("The configured account has an incompatible platform role")
         user.platform_role = SUPER_ADMIN_ROLE
+        user.admin_password_hash = hash_password(password)
         provisioning_method = "existing_account_promotion"
     else:
         user = User(
             name="Platform Administrator",
             email=email,
-            password_hash=hash_password(password),
+            password_hash=hash_password(secrets.token_urlsafe(48)),
             platform_role=SUPER_ADMIN_ROLE,
+            admin_password_hash=hash_password(password),
         )
         db.session.add(user)
         db.session.flush()

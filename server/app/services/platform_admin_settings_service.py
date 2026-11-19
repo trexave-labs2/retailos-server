@@ -1,10 +1,10 @@
 """Self-service profile and session security for platform administrators."""
 
-from flask import request, session
+from flask import g, jsonify, make_response, request
 
 from server.app.extensions import db
+from server.app.middleware.auth_middleware import clear_admin_session
 from server.app.models.platform_audit_log import PlatformAuditLog
-from server.app.models.user import User
 from server.app.utils.response import Response
 from server.app.utils.time import now_utc
 from server.app.utils.validators import validate_required_string
@@ -13,13 +13,12 @@ from server.app.utils.validators import validate_required_string
 class PlatformAdminSettingsService:
     @staticmethod
     def _current_admin():
-        return db.session.get(User, session.get("user_id"))
+        return g.platform_admin
 
     @staticmethod
     def get_profile():
         user = PlatformAdminSettingsService._current_admin()
         if not user:
-            session.clear()
             return Response.error_response("USER_NOT_FOUND", "User not found", {}), 401
         return Response.success_response({
             "profile": {
@@ -51,7 +50,6 @@ class PlatformAdminSettingsService:
 
         user = PlatformAdminSettingsService._current_admin()
         if not user:
-            session.clear()
             return Response.error_response("USER_NOT_FOUND", "User not found", {}), 401
 
         new_name = data["name"].strip()
@@ -94,22 +92,21 @@ class PlatformAdminSettingsService:
 
         user = PlatformAdminSettingsService._current_admin()
         if not user:
-            session.clear()
             return Response.error_response("USER_NOT_FOUND", "User not found", {}), 401
 
-        user.session_version += 1
+        user.admin_session_version += 1
         db.session.add(PlatformAuditLog(
             actor_user_id=user.id,
             action_type="platform_admin.sessions_revoked",
             target_type="user",
             target_id=str(user.id),
-            details={"revoked_session_version": user.session_version - 1,
-                     "new_session_version": user.session_version},
+            details={"revoked_session_version": user.admin_session_version - 1,
+                     "new_session_version": user.admin_session_version},
             created_at=now_utc(),
         ))
         db.session.commit()
-        session.clear()
-        return Response.success_response({
+        response = make_response(jsonify(Response.success_response({
             "revoked": True,
             "sessions_invalidated": "all",
-        }, "PLATFORM_ADMIN_SESSIONS_REVOKED"), 200
+        }, "PLATFORM_ADMIN_SESSIONS_REVOKED")), 200)
+        return clear_admin_session(response)

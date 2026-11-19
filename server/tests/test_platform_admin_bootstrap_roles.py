@@ -3,7 +3,7 @@ import pytest
 from server.app.extensions import db
 from server.app.models.platform_audit_log import PlatformAuditLog
 from server.app.models.user import PLATFORM_ADMIN_ROLE, SUPER_ADMIN_ROLE, User
-from server.app.utils.security import verify_password
+from server.app.utils.security import hash_password, verify_password
 
 
 def _register(client, email):
@@ -14,8 +14,8 @@ def _register(client, email):
     })
 
 
-def _login(client, email):
-    response = client.post("/auth/login", json={"email": email, "password": "test-password-123"})
+def _login(client, email, password="test-password-123"):
+    response = client.post("/admin/auth/login", json={"email": email, "password": password})
     assert response.status_code == 200
 
 
@@ -31,7 +31,8 @@ def test_bootstrap_creates_super_admin_without_registration(app):
     with app.app_context():
         user = User.query.filter_by(email="root@example.com").one()
         assert user.platform_role == SUPER_ADMIN_ROLE
-        assert verify_password("initial-password-123", user.password_hash)
+        assert verify_password("initial-password-123", user.admin_password_hash)
+        assert not verify_password("initial-password-123", user.password_hash)
         assert PlatformAuditLog.query.filter_by(action_type="platform_admin.bootstrap").count() == 1
 
 
@@ -61,6 +62,7 @@ def test_existing_registered_account_is_promoted_without_password_reset(app, cli
         user = User.query.filter_by(email="root@example.com").one()
         assert user.platform_role == SUPER_ADMIN_ROLE
         assert verify_password("test-password-123", user.password_hash)
+        assert verify_password("initial-password-123", user.admin_password_hash)
 
 
 def test_missing_bootstrap_configuration_fails_closed(app):
@@ -71,16 +73,13 @@ def test_missing_bootstrap_configuration_fails_closed(app):
 
 def test_admin_cannot_manage_other_admin_roles(app, client):
     with app.app_context():
-        root = User(name="Root", email="root@example.com", password_hash="hash", platform_role=SUPER_ADMIN_ROLE)
-        admin = User(name="Admin", email="admin@example.com", password_hash="hash", platform_role=PLATFORM_ADMIN_ROLE)
+        root = User(name="Root", email="root@example.com", password_hash=hash_password("retail-password-123"), admin_password_hash=hash_password("root-admin-password-123"), platform_role=SUPER_ADMIN_ROLE)
+        admin = User(name="Admin", email="admin@example.com", password_hash=hash_password("retail-password-123"), admin_password_hash=hash_password("admin-password-123"), platform_role=PLATFORM_ADMIN_ROLE)
         target = User(name="Target", email="target@example.com", password_hash="hash")
         db.session.add_all([root, admin, target])
         db.session.commit()
         admin_id, target_id = admin.id, target.id
-    client.post("/auth/login", json={"email": "admin@example.com", "password": "not-valid"})
-    with client.session_transaction() as sess:
-        sess["user_id"] = admin_id
-        sess["session_version"] = 0
+    _login(client, "admin@example.com", "admin-password-123")
     response = client.put(f"/admin/users/{target_id}/admin-role", json={"platform_role": "admin"})
     assert response.status_code == 403
     assert response.json["error"]["code"] == "SUPER_ADMIN_REQUIRED"
@@ -88,14 +87,12 @@ def test_admin_cannot_manage_other_admin_roles(app, client):
 
 def test_super_admin_can_grant_and_revoke_admin_with_audit(app, client):
     with app.app_context():
-        root = User(name="Root", email="root@example.com", password_hash="hash", platform_role=SUPER_ADMIN_ROLE)
+        root = User(name="Root", email="root@example.com", password_hash=hash_password("retail-password-123"), admin_password_hash=hash_password("root-admin-password-123"), platform_role=SUPER_ADMIN_ROLE)
         target = User(name="Target", email="target@example.com", password_hash="hash")
         db.session.add_all([root, target])
         db.session.commit()
         root_id, target_id = root.id, target.id
-    with client.session_transaction() as sess:
-        sess["user_id"] = root_id
-        sess["session_version"] = 0
+    _login(client, "root@example.com", "root-admin-password-123")
     granted = client.put(f"/admin/users/{target_id}/admin-role", json={"platform_role": "admin"})
     assert granted.status_code == 200
     revoked = client.put(f"/admin/users/{target_id}/admin-role", json={"platform_role": None})
