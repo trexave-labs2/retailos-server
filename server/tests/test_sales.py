@@ -530,6 +530,9 @@ def test_sales_can_group_by_payment_method(client):
         )
         assert response.status_code == 201
 
+    trial = client.post("/subscriptions/trial", json={"store_id": store_id})
+    assert trial.status_code == 200
+
     response = client.get(
         f"/sales?store_id={store_id}&group_by=payment_method"
     )
@@ -1499,6 +1502,9 @@ def test_sales_combined_date_category_and_payment_filters_include_export_data(cl
         )
         assert response.status_code == 201
 
+    trial = client.post("/subscriptions/trial", json={"store_id": store_id})
+    assert trial.status_code == 200
+
     today_lagos = datetime.now(ZoneInfo("Africa/Lagos")).date().isoformat()
     response = client.get(
         f"/sales?store_id={store_id}&start_date={today_lagos}"
@@ -1821,3 +1827,21 @@ def test_checkout_unexpected_failure_rolls_back_and_returns_safe_error(client, m
     assert SaleItem.query.count() == 0
     assert SalePayment.query.count() == 0
     assert InventoryMovement.query.count() == 0
+
+
+def test_free_plan_cannot_use_grouped_sales_reporting(client):
+    store_id = register_and_login(client, username="sales-group-free-user")
+    response = client.get(f"/sales?store_id={store_id}&group_by=payment_method")
+    assert response.status_code == 403
+    assert response.json["error"]["code"] == "FEATURE_NOT_AVAILABLE"
+    assert response.json["error"]["fields"]["feature"] == "advanced_reporting"
+
+
+def test_free_plan_cannot_use_custom_sales_date_ranges(client):
+    store_id = register_and_login(client, username="sales-date-free-user")
+    response = client.get(
+        f"/sales?store_id={store_id}&start_date=2026-10-01&end_date=2026-10-31"
+    )
+    assert response.status_code == 403
+    assert response.json["error"]["code"] == "FEATURE_NOT_AVAILABLE"
+    assert response.json["error"]["fields"]["feature"] == "advanced_reporting"

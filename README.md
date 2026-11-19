@@ -37,6 +37,7 @@ Run the full test suite:
 The test suite covers:
 
 - Authentication and session handling
+- Password reset token issuance, expiry, single-use enforcement, rate limiting and session invalidation
 - Production configuration requirements
 - Product creation, retrieval, updates and deletion
 - Product validation and store authorization
@@ -52,7 +53,14 @@ The test suite covers:
 - Alert store authorization
 - Dashboard metrics, daily summaries and daily business brief
 - Migration 003 upgrade/downgrade symmetry
+- Password reset migration upgrade/downgrade symmetry
 - Password length validation at the bcrypt byte limit
+- Owner-authorized account export, export limits, secret exclusion and cross-store isolation
+- Account/store deletion recovery, session invalidation, cross-account isolation, finalization, and rollback
+
+## Subscription billing readiness
+
+Paid Pro activation is not configured. `POST /subscriptions/change` creates a pending request only; it does not confirm payment or grant paid entitlements. The active subscription and any pending request are returned separately by `GET /subscriptions`. Client-supplied payment or plan-status fields are not trusted. See [docs/subscriptions.md](docs/subscriptions.md) for plan limits, request states, trial behavior, and the billing-provider requirements that must be completed before paid launch.
 
 ## Frontend API Guide
 
@@ -137,6 +145,70 @@ Login creates the authenticated session.
 **POST** `/auth/logout`
 
 No request body is required.
+
+### Request account deletion
+
+**POST** `/auth/delete-account`
+
+Requires an authenticated session, the current password, and the exact confirmation phrase:
+
+```json
+{
+  "current_password": "your-current-password",
+  "confirmation": "DELETE MY ACCOUNT"
+}
+```
+
+The server immediately blocks normal account access, invalidates existing sessions, and marks every owned store as pending deletion. The response is HTTP 202 and includes the recovery deadline. The account and stores remain recoverable for 30 days.
+
+### Cancel account deletion
+
+**POST** `/auth/cancel-account-deletion`
+
+This recovery endpoint does not require an existing session because the deletion request invalidates sessions. It requires the account email and current password:
+
+```json
+{
+  "email": "owner@example.com",
+  "password": "your-current-password"
+}
+```
+
+Cancellation is accepted only before the 30-day deadline. It restores the account and stores to active status and increments the session version; the owner must log in again. Requests after the deadline return `410 RECOVERY_PERIOD_EXPIRED`.
+
+The self-service flow is unavailable to platform administrator accounts.
+
+### Request deletion of one store
+
+**POST** `/settings/store/delete`
+
+Requires an authenticated owner session, the current password, a positive `store_id` owned by that account, and the exact confirmation phrase `DELETE STORE`. The selected store becomes inaccessible immediately; the account and other owned stores remain active.
+
+### Cancel one store deletion
+
+**POST** `/settings/store/cancel-deletion`
+
+Requires the active owner session, the store ID, and the current password. It restores only that store and is accepted only before its 30-day deadline. A store whose recovery period has expired cannot be restored.
+
+### Scheduled deletion finalization
+
+The recovery period is enforced by the backend finalizer, not by a database TTL. Configure a daily deployment scheduler to run:
+
+```bash
+flask --app server.wsgi:application account-deletion finalize-due
+```
+
+The command finalizes due account-level and store-level requests, removes customer contact details, deletes categories/products without historical references, and anonymizes catalog labels where transaction, inventory, or audit references require the row to remain. It preserves sales, sale items, payments, refunds, inventory movements, and immutable audit rows. The store and user database rows remain as anonymized tombstones because audit and financial relationships may reference them.
+
+The repository cannot control database-provider backups, hosting logs, SMTP logs, or other provider-held copies. Their retention must be configured and verified separately.
+
+### Password reset
+
+**POST** `/auth/password-reset/request` accepts an email address and always returns the same generic `202 PASSWORD_RESET_REQUEST_ACCEPTED` response for valid email syntax, whether or not the account exists. Requests are limited to 5 per client IP per hour. If the account exists, the server emails a one-time reset link.
+
+**POST** `/auth/password-reset/complete` accepts `token` and `new_password`. Tokens expire after 30 minutes by default, are single-use, and only their SHA-256 digest is stored. Successful completion increments the user's session version, revoking all existing sessions. Invalid, expired, and reused tokens share the same error response.
+
+See [docs/PASSWORD_RESET_API.md](docs/PASSWORD_RESET_API.md) for the full request/response contract and required SMTP configuration. Configure `PASSWORD_RESET_SMTP_HOST`, `PASSWORD_RESET_FROM_EMAIL`, and any required SMTP credentials in the deployment environment. Never commit them.
 
 ---
 
@@ -435,7 +507,7 @@ For service products, the sale quantity is still recorded and priced normally, b
 
 **GET** /sales?store_id=1
 
-The sales endpoint supports combined filters. Every filter is optional:
+The sales endpoint supports combined filters. Every filter is optional. Custom date ranges (`start_date` / `end_date`) and grouped payment-method reporting (`group_by=payment_method`) require an active Pro entitlement; ordinary sales history and standalone payment-method/category filters remain available on Free:
 
 - start_date=2026-10-01 includes sales from the start of that Africa/Lagos calendar date.
 - end_date=2026-10-22 includes sales through the end of that Africa/Lagos calendar date.
@@ -606,6 +678,8 @@ Both dates use `YYYY-MM-DD` and Africa/Lagos calendar-day boundaries. With no da
 | POST | `/auth/login` | Log in and create session |
 | POST | `/auth/logout` | Log out |
 | POST | `/auth/change-password` | Change password and invalidate sessions |
+| POST | `/auth/password-reset/request` | Request a one-time password reset email |
+| POST | `/auth/password-reset/complete` | Complete password reset and revoke sessions |
 | PATCH | `/settings/store` | Update the authenticated owner’s store name |
 | POST | `/product/create` | Create product |
 | GET | `/product/get?id=1&store_id=1` | Get one product |
@@ -752,3 +826,56 @@ Configure these environment variables in the deployment dashboard, never in sour
 - `FEEDBACK_TO_EMAIL`: company inbox that receives feedback.
 
 A mail provider accepting the message means it has accepted responsibility for delivery, not that a person has read it. Keep the destination mailbox monitored and configure SPF/DKIM/DMARC with the email provider as appropriate.
+
+
+## Platform administration
+
+Platform-level read APIs are documented in [docs/PLATFORM_ADMIN_API.md](docs/PLATFORM_ADMIN_API.md). They provide the admin overview, paginated user and store lists, and individual user/store details. All routes require the server-provisioned platform-admin role and return aggregate store activity only; they do not expose store operational records.
+
+- `GET /admin/overview`
+- `GET /admin/users` and `GET /admin/users/{id}`
+- `GET /admin/stores` and `GET /admin/stores/{id}`
+
+The frontend must use server-side pagination and filters. Expired subscription periods are excluded from active-premium metrics.
+
+
+### Feedback support and platform audit administration
+
+Platform administrators can use the feedback and platform audit endpoints
+documented in `docs/PLATFORM_ADMIN_API.md`:
+
+- `GET /admin/feedback` and `GET /admin/feedback/{id}`
+- `PATCH /admin/feedback/{id}/status`
+- `GET /admin/audit-logs`
+
+Feedback email-delivery status is separate from its support workflow status.
+Administrative status changes are recorded in the append-only platform audit
+history in the same transaction as the feedback update.
+
+
+## Store account data export
+
+Subscription-gated reporting and export endpoints, effective Pro/trial rules, and the standard denial response are documented in [Pro entitlement enforcement](docs/PRO_ENTITLEMENTS.md).
+
+**GET** `/settings/export?store_id=1`
+
+Requires a valid authenticated session and verifies that the signed-in user owns the requested store. The endpoint returns a downloadable JSON attachment named `retailos-store-<store-id>-export-<date>.json`. The frontend must send the authenticated session cookie and the owner's store ID.
+
+The version 1 export includes:
+- Store profile and available store settings, plus the owner's public name and email.
+- Product and service records, categories, and configured product units.
+- Customers and their outstanding balances.
+- Sales, sale line items, payment history, refunds, and refund line items.
+- Inventory movements and stock receiving history.
+- Store alerts, including their resolution/read/dismissal state.
+
+Records are store-scoped on the server. Related records such as sale items and payments are selected through their parent sale's store ID; product units are selected through their parent product. Monetary values are represented as decimal strings and timestamps as ISO 8601 strings so clients do not lose decimal precision or timestamp information.
+
+The export has a hard limit of **25,000 records across all exported collections**. If the store exceeds that limit, the endpoint returns HTTP 413 with the standard API error envelope and `EXPORT_TOO_LARGE`; no partial export is returned. Contact support for an assisted export above the limit.
+
+The export intentionally excludes password hashes, session identifiers and versions, password-reset tokens, secrets, platform-admin records, and internal authentication data. Responses use `Cache-Control: no-store` and are marked as attachments. The endpoint does not accept a store ID from a request body or trust client-supplied ownership claims.
+
+
+### Platform monitoring management
+
+The platform-admin monitoring control-plane API is documented in [docs/PLATFORM_MONITORING_API.md](docs/PLATFORM_MONITORING_API.md). It provides monitor configuration, manual checks, check history, incidents, and a persistent database contract for an independently operated scheduler. The Flask API does not run a recurring scheduler; external scheduler deployment and least-privilege database access are separate operational requirements.

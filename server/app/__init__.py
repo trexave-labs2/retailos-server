@@ -7,10 +7,13 @@ from flask_migrate import Migrate
 
 from server.app.config import Config, ProductionConfig
 from server.app.extensions import db, limiter
+from server.app.commands.platform_admin import platform_admin_cli
+from server.app.commands.account_deletion import account_deletion_cli
 from server.app.routes.alert_routes import alert_bp
 from server.app.routes.audit_routes import audit_bp
 from server.app.routes.auth_routes import auth_bp
 from server.app.routes.settings_routes import settings_bp
+from server.app.routes.account_export_routes import account_export_bp
 from server.app.routes.customer_routes import customer_bp
 from server.app.routes.category_routes import category_bp
 from server.app.routes.dashboard_routes import dashboard_bp
@@ -21,6 +24,8 @@ from server.app.routes.sales_routes import sales_bp
 from server.app.routes.refund_routes import refund_bp
 from server.app.routes.stock_receiving_routes import stock_receiving_bp
 from server.app.routes.subscription_routes import subscription_bp
+from server.app.routes.platform_admin_routes import platform_admin_bp
+from server.app.routes.monitoring_routes import monitoring_bp
 from server.app.utils.response import Response
 
 
@@ -29,7 +34,7 @@ def create_app(config_class=Config):
     app.config.from_object(config_class)
 
     if config_class is ProductionConfig:
-        app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=0, x_port=0, x_prefix=0)
+        app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=0, x_port=0)
 
     if config_class is ProductionConfig:
         app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY")
@@ -53,6 +58,7 @@ def create_app(config_class=Config):
     db.init_app(app)
     app.register_blueprint(auth_bp,url_prefix="/auth")
     app.register_blueprint(settings_bp,url_prefix="/settings")
+    app.register_blueprint(account_export_bp,url_prefix="/settings")
     app.register_blueprint(product_bp,url_prefix="/product")
     app.register_blueprint(category_bp, url_prefix="/categories")
     app.register_blueprint(stock_receiving_bp,url_prefix="/product/receivings")
@@ -65,6 +71,10 @@ def create_app(config_class=Config):
     app.register_blueprint(health_bp,url_prefix="/health")
     app.register_blueprint(feedback_bp,url_prefix="/feedback")
     app.register_blueprint(subscription_bp,url_prefix="/subscriptions")
+    app.register_blueprint(platform_admin_bp,url_prefix="/admin")
+    app.register_blueprint(monitoring_bp,url_prefix="/admin")
+    app.cli.add_command(platform_admin_cli)
+    app.cli.add_command(account_deletion_cli)
     Migrate(app,db)
 
     allowed_origins = {origin.strip().rstrip("/") for origin in app.config["CORS_ORIGINS"].split(",") if origin.strip()}

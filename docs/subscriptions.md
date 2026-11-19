@@ -31,6 +31,19 @@ The Free dashboard includes today's and this month's sales and current stock lev
 
 Pro reporting is intended to include profit per product, top and slow sellers, sales over a custom date range, low-stock alerts, and staff sales performance. The plan catalog describes these entitlements. The staff-account system and all corresponding Pro feature gates must be implemented before those features are marketed as available to paying customers. Existing V1 endpoints must not be treated as safely gated merely because the catalog says a feature is Pro-only.
 
+## Subscription request and activation states
+
+A plan-change request is not a subscription activation. The current API has no configured payment provider, so paid Pro cannot be activated through `POST /subscriptions/change`.
+
+- A successful Pro change request is stored with `status: pending` and returns HTTP `202`, `activation: not_activated`, and `billing.status: not_configured`.
+- The response's `current_subscription` reports the plan and status that are active now. It remains Free unless the store has a valid Pro trial or a separately verified activation.
+- `GET /subscriptions?store_id=...` reports the active plan in `subscription.plan` and a separate `subscription.pending_change`. The pending request includes its requested interval, price snapshot, payment requirement, and `activation: not_activated`.
+- Repeating the same plan and billing interval returns the existing pending request; it does not create another request or activate the plan.
+- A request for a different target plan or billing interval is rejected while another change is pending. Cancel the pending request before submitting a different one.
+- Client-supplied payment flags, prices, plan fields, or subscription statuses are ignored. Only server-controlled trial logic or a future verified billing workflow may change entitlements.
+
+A future provider integration is separate work. It must verify webhook signatures, authenticate payment events, process provider event IDs idempotently, validate the store and expected amount/currency/interval against the server-side request, and update the subscription only after confirmed payment. It must also define renewal, expiry, refund, chargeback, failed-payment, retry, and cancellation transitions. A browser redirect or client success callback is not proof of payment.
+
 ## Trial
 
 - `POST /subscriptions/trial` starts a 14-day Pro trial for an authenticated store owner.

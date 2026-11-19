@@ -46,3 +46,19 @@ Production should use:
     SESSION_COOKIE_SECURE=True
 
 when the application is served over HTTPS.
+
+## Platform administrator provisioning
+
+Platform-administrator access is separate from store ownership. It is stored in the server-managed users.platform_role column and is never accepted from registration or other client request data.
+
+The first platform administrator must first create a normal RetailOS account. Provisioning then requires all of the following:
+
+1. Set PLATFORM_ADMIN_BOOTSTRAP_EMAIL to that account's email.
+2. Generate a one-time bootstrap secret with at least 32 characters and set it as PLATFORM_ADMIN_BOOTSTRAP_TOKEN in the server environment.
+3. Deploy the migration before running the command.
+4. Run flask --app server.app platform-admin bootstrap admin@example.com from a trusted operator environment. The command prompts for the token without echoing it.
+5. Remove both bootstrap environment variables from the deployment environment after successful provisioning.
+
+The command only provisions the configured email, refuses to run after a bootstrap audit event exists, and writes the initial event to the append-only platform audit log. Do not put the token in shell arguments, source control, issue comments, or pull-request comments.
+
+Protected platform routes must use require_platform_admin. It first validates the existing server session and then reads the platform role from the database. Store owners receive 403; unauthenticated requests receive 401.

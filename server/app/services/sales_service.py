@@ -979,6 +979,16 @@ class SalesService:
                 {}
             ), 400
 
+        # Full transaction history remains available on Free. Custom date
+        # ranges and grouped payment reports are Pro reporting capabilities.
+        if start_date_raw is not None or end_date_raw is not None or group_by is not None:
+            from server.app.services.subscription_service import SubscriptionService
+            feature_error = SubscriptionService.check_feature(
+                store_id, "advanced_reporting"
+            )
+            if feature_error:
+                return feature_error
+
         sales_query = Sale.query.filter(Sale.store_id == store_id)
 
         if payment_method is not None:

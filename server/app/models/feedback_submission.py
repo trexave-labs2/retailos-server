@@ -15,6 +15,7 @@ class FeedbackSubmission(db.Model):
         UniqueConstraint("submission_id", name="uq_feedback_submission_id"),
         Index("ix_feedback_status_created_at", "status", "created_at"),
         Index("ix_feedback_category_created_at", "category", "created_at"),
+        Index("ix_feedback_support_status_created_at", "support_status", "created_at"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
@@ -24,6 +25,9 @@ class FeedbackSubmission(db.Model):
     contact_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
     contact_email: Mapped[str | None] = mapped_column(String(254), nullable=True)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
+    support_status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="new", server_default="new"
+    )
     delivery_error: Mapped[str | None] = mapped_column(String(80), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, nullable=False)
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

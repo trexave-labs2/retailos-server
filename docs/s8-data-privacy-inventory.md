@@ -56,9 +56,9 @@ Feedback is sent through SMTP using environment-configured settings. The email i
 
 ## Retention behavior
 
-The repository defines timestamps for account, store, retail, audit, feedback, and subscription records, but does not define a general data-retention schedule.
+The account/store closure workflow defines a 30-day recovery period before application-level anonymization and deletion of eligible catalog data. The repository does not define a general retention schedule for feedback, audit history, provider logs, or database backups.
 
-No scheduled cleanup or automatic expiration process for business records or feedback submissions was found in the server source tree. Feedback records marked sent or failed remain in the database unless removed through database administration or other infrastructure-level action. Audit records are explicitly protected against normal ORM deletion and have no retention job in this repository.
+The account/store finalization command is scheduled externally and is not an in-process scheduler. Feedback records marked sent or failed remain in the database unless removed through database administration or other infrastructure-level action. Audit records are explicitly protected against normal ORM deletion and have no retention job in this repository.
 
 Flask's default signed-cookie sessions are not stored in a server-side session table. Session invalidation is supported through logout, password changes, and the session-version check in authentication middleware; cookie lifetime behavior should be confirmed against the deployed Flask configuration and browser behavior.
 
@@ -66,15 +66,17 @@ Database backups, hosting logs, SMTP provider logs, and Redis persistence/expiry
 
 ## Deletion and account closure behavior
 
-- Product and customer records have individual delete API operations, subject to service-level validation, authorization, and database constraints.
-- The repository exposes no public account-deletion endpoint and no public store-deletion endpoint.
-- The fact that some foreign keys specify cascading deletion does not mean users can request account deletion through the product. Other relationships can restrict deletion, including audit history and sale/refund relationships.
-- Audit entries cannot be deleted through the model's normal ORM events.
-- There is no documented user self-service workflow in this backend for deleting all account, store, transaction, feedback, audit, backup, or provider-held data.
-- Logging out clears the browser session; it does not delete the account or store data.
-- Deleting a customer or product is not equivalent to deleting all records that may relate to prior transactions.
-
-Until an account deletion and retention process is implemented and verified, the public Privacy page must not promise that users can delete their entire account or that all personal data is automatically erased after a stated period.
+- An authenticated owner can request closure of one owned store through `POST /settings/store/delete`; only that store becomes inaccessible. The owner can cancel through `POST /settings/store/cancel-deletion` before the 30-day deadline.
+- An authenticated owner can request account deletion through `POST /auth/delete-account`. The request requires the current password and the exact confirmation phrase `DELETE MY ACCOUNT`.
+- The server immediately changes the account to `pending_deletion`, increments the session version, clears the current session, and marks every owned active store as `pending_deletion`. Normal login and protected API access are blocked while deletion is pending.
+- The owner can cancel during the 30-day recovery period through `POST /auth/cancel-account-deletion`, using the account email and current password. Cancellation restores the account and stores and requires a fresh login. Platform administrator accounts cannot use this self-service flow.
+- A scheduled backend command, `flask --app server.wsgi:application account-deletion finalize-due`, finalizes due account-level and store-level requests after their recovery deadlines. Production must configure a daily scheduler for this command; the application does not create its own scheduler.
+- Finalization anonymizes the account name/email/password credentials and store name. Customer names and contact values are anonymized while outstanding balances and transaction links remain.
+- Categories and products without transaction, inventory, or audit references are deleted. Referenced categories are retained with anonymized labels. Products that are still referenced are retained as anonymized catalog placeholders so financial and inventory history remains joinable.
+- Sales, sale items, payments, refunds, stock receiving records, inventory movements, and audit history are retained. Store and user rows remain as anonymized tombstones where foreign-key relationships require them; this is not a physical deletion of every database row.
+- Audit logs are immutable and may contain historical values captured before closure. They are retained to preserve the audit trail and are not rewritten by the finalizer.
+- Password-reset tokens for the account are removed during finalization. Feedback submissions are separate records and are not automatically associated with or deleted by account closure.
+- Database backups, hosting logs, SMTP provider logs, and other infrastructure-held copies are outside this application workflow. Their retention and expiration must be verified and configured with the relevant providers.
 
 ## Privacy-page wording guardrails
 
@@ -82,10 +84,10 @@ The Privacy page can accurately say, after confirming the deployed configuration
 
 It should explain that feedback may be emailed to the configured support recipient and that database, hosting, email, and rate-limiting infrastructure may process data as service providers. Name specific vendors, countries, or transfer destinations only after checking the production deployment and provider agreements.
 
-Do not currently claim any of the following based only on this repository:
+Do not claim any of the following based only on this repository:
 
-- A fixed retention period or automatic deletion deadline.
-- A complete account deletion or data-erasure feature.
+- That the 30-day application recovery period also governs provider-managed backups, hosting logs, SMTP logs, or other infrastructure copies.
+- That every row or every historical value is physically erased. Immutable audit JSON and referenced catalog rows can remain.
 - A particular production database, hosting, SMTP, or Redis vendor or data-residency location.
 - That no technical logs, backups, or third-party processing exist.
 - That all customer information entered by a store is anonymous or never shared outside the store's browser.
@@ -95,5 +97,6 @@ Do not currently claim any of the following based only on this repository:
 1. Confirm the deployed frontend's analytics, cookies, error reporting, and third-party scripts.
 2. Record the actual production hosting, database, SMTP, and Redis providers, regions, backup settings, and relevant subprocessors.
 3. Decide and implement retention periods for feedback, audit history, operational logs, and backups, including a documented exception process where required.
-4. Design an authenticated account/store closure and data export/deletion process that preserves required financial/audit integrity and handles provider backups.
-5. Add tests and operational verification for any new retention or deletion behavior before changing the public Privacy page to promise it.
+4. Configure and monitor a daily production schedule for `account-deletion finalize-due`; the command is not self-scheduling.
+5. Confirm and document provider backup, hosting-log, SMTP-log, and Redis retention independently of application data finalization.
+6. Add frontend confirmation and recovery messaging only after the API is deployed and tested.

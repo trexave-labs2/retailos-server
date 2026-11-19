@@ -4,7 +4,7 @@ from decimal import Decimal
 from server.app.extensions import db
 from server.app.models.store import Store
 from server.app.models.customer import Customer
-from server.app.utils.time import ensure_utc, is_future
+from server.app.utils.time import ensure_utc, is_future, now_utc
 from sqlalchemy.orm import Mapped, mapped_column, validates
 from sqlalchemy import CheckConstraint, ForeignKey, DateTime, Integer, Numeric, String
 
@@ -40,7 +40,7 @@ class Sale(db.Model):
     amount_paid: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=0, nullable=False)
     balance: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=0, nullable=False)
     payment_method: Mapped[str] = mapped_column(String(20), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ensure_utc)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
 
     @validates("payment_method")
     def validate_payment_method(self, key, value):

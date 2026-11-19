@@ -259,3 +259,22 @@ Possible later tables include:
 - store memberships and roles
 
 These are intentionally outside the current V1 schema.
+
+
+## 15. Account and store closure lifecycle
+
+Account closure is a staged deactivation/anonymization workflow, not a cascading delete.
+
+- `users.account_status` is `active`, `pending_deletion`, or `anonymized`.
+- `stores.status` is `active`, `pending_deletion`, or `deleted`.
+- The owner must re-enter the current password and type `DELETE MY ACCOUNT`.
+- All owned active stores become inaccessible immediately and the user's session version is incremented.
+- The owner can close one store independently using its ID, current password, and the confirmation phrase `DELETE STORE`. Other stores and the account remain active.
+- Store closure can be cancelled using the active owner session and current password for 30 days.
+- Account closure can be cancelled using email and password for 30 days. A fresh login is required after account cancellation.
+- A scheduled `account-deletion finalize-due` command performs finalization after account-level or store-level recovery deadlines. Deployment must schedule this command; it is not an in-process timer.
+- Account and store rows remain as anonymized tombstones because immutable audit rows and financial relationships can depend on them.
+- Customer identifying fields are anonymized. Categories and products without transaction, inventory, or audit references are deleted. Referenced categories are retained with anonymized labels; products referenced by sales, refunds, stock receipts, inventory movements, or audit records are retained with anonymized catalog labels.
+- Sales, sale items, payment records, refunds, stock receiving history, inventory movements, and audit history remain available in storage and are not cascade-deleted.
+- Audit rows remain immutable. Historical before/after JSON can retain values captured before closure.
+- Provider-managed backups and infrastructure logs follow provider configuration, not this application workflow.
